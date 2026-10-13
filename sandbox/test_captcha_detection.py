@@ -44,6 +44,8 @@ def test_observed_layout_classification():
                 detection = await inspect_captcha(page)
                 assert detection['state'] == 'ready'
                 assert detection['candidates'][0]['frame_index'] == 1
+                await page.locator('iframe').evaluate("el=>el.hidden=true")
+                assert (await inspect_captcha(page))['state'] == 'unrecognized'
                 await page.set_content(text + '<iframe></iframe>')
                 await page.frames[1].set_content(text)
                 assert (await inspect_captcha(page))['state'] == 'ambiguous'

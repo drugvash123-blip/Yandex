@@ -10,6 +10,10 @@ async def inspect_captcha(page):
     candidates = []
     for index, frame in enumerate(page.frames):
         try:
+            if frame != page.main_frame:
+                element = await frame.frame_element()
+                if not await element.is_visible():
+                    continue
             state = await frame.evaluate('''() => {
                 const visible = el => !!el && el.getClientRects().length > 0 &&
                     getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';

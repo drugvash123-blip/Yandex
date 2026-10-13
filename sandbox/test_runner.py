@@ -66,7 +66,7 @@ def local_site():
                     if query == "auto-next":
                         destination = '/search?' + urlencode({'text': query, 'round': 2})
                     html = f'''<title>Вы не робот?</title><div class="AdvancedCaptcha">
-                    <div class="AdvancedCaptcha-View" style="width:100px;height:50px;background:red"></div>
+                    <div class="AdvancedCaptcha-View"><img src="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%22100%22%20height=%2250%22%3E%3Crect%20width=%22100%22%20height=%2250%22%20fill=%22red%22/%3E%3C/svg%3E"></div>
                     <div class="Textinput"><input></div><button class="CaptchaButton_view_action"
                     onclick="if(document.querySelector('input').value==='answer') location.href='{destination}';else document.querySelector('#incorrect').hidden=false">Check</button>
                     <p id="incorrect" hidden>Incorrect answer</p></div>'''
@@ -409,7 +409,7 @@ def test_navigation_after_runner_stops_is_captured_separately(local_site, tmp_pa
     ("auto-failure", "captcha"),
 ])
 def test_injected_captcha_search_flow(local_site, tmp_path, query, expected):
-    from captcha_browser import Challenge, solve_challenge
+    from captcha_handler import TextCaptchaHandler
     calls = []
 
     async def solver(image):
@@ -421,11 +421,8 @@ def test_injected_captcha_search_flow(local_site, tmp_path, query, expected):
         if query == "auto-failure":
             from captcha_service import CaptchaError
             raise CaptchaError("transport_failed")
-        # This selector means an outcome appeared, not that CAPTCHA succeeded.
-        challenge = Challenge('text', '.AdvancedCaptcha-View', '.CaptchaButton_view_action',
-                              '.OrganicTitle-Link, #next-challenge, #incorrect, #rate-limit',
-                              input_selector='.Textinput input')
-        await solve_challenge(page, challenge, solver, timeout=5)
+        selected = TextCaptchaHandler(solver, outcome_selector='.OrganicTitle-Link, #next-challenge, #incorrect, #rate-limit', timeout=5)
+        await selected(page)
 
     result = asyncio.run(run_task(Task(query, "127.0.0.1"), base_url=local_site.url,
                                  click=True, max_pages=1, deadline=25, captcha_wait=3,

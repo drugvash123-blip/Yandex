@@ -87,7 +87,10 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
                 for x, y in points:
                     await image.click(position={'x': x, 'y': y})
             await submit.click()
-            await success.first.wait_for(state='visible')
+            # A union selector can have a hidden error marker before a visible
+            # outcome. Waiting on .first would then miss the actual outcome.
+            while not any([await item.is_visible() for item in await success.all()]):
+                await asyncio.sleep(0.1)
             return True
     except TimeoutError:
         raise CaptchaError('browser_deadline_exceeded') from None
