@@ -60,6 +60,9 @@ def local_site():
                 html = '<title>Unavailable</title>'
             elif query == "captcha":
                 html = '<title>Вы не робот?</title><div class="CheckboxCaptcha"></div>'
+            elif query == "captcha-with-image":
+                html = '''<title>Вы не робот?</title><div class="AdvancedCaptcha"><img width="30" height="20"></div>
+                <script>setTimeout(()=>document.querySelector('img').src='data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2230%22%20height=%2220%22%3E%3Crect%20width=%2230%22%20height=%2220%22%20fill=%22red%22/%3E%3C/svg%3E',700)</script>'''
             elif query == "captcha-cleared":
                 target = f"http://127.0.0.1:{self.server.server_port}/target"
                 html = f'''<title>Вы не робот?</title><div class="CheckboxCaptcha"></div>
@@ -198,6 +201,16 @@ def test_captcha_wait(local_site, tmp_path, query, wait, status):
     result = asyncio.run(run_task(Task(query, "127.0.0.1"), base_url=local_site.url,
                                  deadline=20, captcha_wait=wait, output=tmp_path, typing_delay_ms=0))
     assert result.status == status, result
+
+
+def test_capture_records_loaded_image(local_site, tmp_path):
+    result = asyncio.run(run_task(Task("captcha-with-image", "example.com"), base_url=local_site.url,
+                                 captcha_wait=3, deadline=20, output=tmp_path, typing_delay_ms=0))
+    assert result.status == "captcha"
+    states = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*.json')]
+    images = [image for state in states for frame in state for image in frame['images']]
+    assert any(image['loaded'] and image['width'] == 30 for image in images)
+    assert all('source' not in image and 'source_digest' in image for image in images)
 
 
 @pytest.mark.parametrize("query,status", [("rate-limit-recovers", "found"), ("rate-limit", "rate_limited")])

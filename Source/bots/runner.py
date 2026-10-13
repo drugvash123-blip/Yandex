@@ -131,17 +131,53 @@ async def terminal_pager(page, current):
 async def wait_captcha(page, result, seconds):
     if not await captcha_present(page):
         return True
+    capture_id = 'captcha-' + uuid.uuid4().hex[:8]
+    captured = set()
+    async def capture():
+        if not result.artifacts:
+            return
+        try:
+            frames = []
+            for frame in page.frames:
+                structure = await frame.evaluate("""() => ({
+                    selectors: Object.fromEntries(['.CheckboxCaptcha-Button', '.AdvancedCaptcha',
+                        '.AdvancedCaptcha-View', '.Textinput input', '.CaptchaButton_view_action',
+                        '#captcha-slider'].map(s=>[s,document.querySelectorAll(s).length])),
+                    images: Array.from(document.querySelectorAll('.AdvancedCaptcha img')).map(img=>({
+                        loaded:img.complete && img.naturalWidth>0, width:img.naturalWidth,height:img.naturalHeight,
+                        source:img.currentSrc || img.src}))
+                })""")
+                for img in structure['images']:
+                    img['source_digest'] = hashlib.sha256(img.pop('source').encode()).hexdigest()
+                frames.append({'url': safe_url(frame.url), **structure})
+            signature = json.dumps(frames, sort_keys=True)
+            if signature in captured:
+                return
+            name = f'{capture_id}-{len(captured)}'
+            directory = Path(result.artifacts)
+            (directory / f'{name}.json').write_text(json.dumps(frames, ensure_ascii=False, indent=2))
+            await save_snapshot(page, directory, name)
+            for i, frame in enumerate(page.frames):
+                (directory / f'{name}-frame-{i}.html').write_text(await frame.content(), encoding='utf-8')
+            captured.add(signature)
+            LOG.info('CAPTCHA structure saved: %s', name)
+        except (BrowserError, OSError):
+            LOG.info('CAPTCHA changed during capture; continuing observation')
+    await capture()
     if seconds:
         LOG.info("Complete CAPTCHA in the browser; waiting up to %s seconds", seconds)
         try:
             async with asyncio.timeout(seconds):
                 while await captcha_present(page):
+                    await capture()
                     await asyncio.sleep(0.5)
         except TimeoutError:
             pass
     if await captcha_present(page):
         result.status, result.detail = "captcha", "Browser requires CAPTCHA completion"
         return False
+    if result.artifacts:
+        await save_snapshot(page, Path(result.artifacts), capture_id + '-after')
     return True
 
 

@@ -82,3 +82,32 @@ def test_challenge_and_success_in_separate_frames(duplicate):
                 await context.close()
                 await browser.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('outside', [False, True])
+def test_capture_includes_instructions_but_clicks_only_image(outside):
+    async def run():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(channel='chrome', headless=True, args=['--no-proxy-server'])
+            context = await browser.new_context(offline=True)
+            try:
+                page = await context.new_page()
+                await page.set_content('''<div id="capture" style="width:100px">
+                <div id="picture" style="height:50px;background:#abc" onclick="window.clicks=(window.clicks||0)+1">Image</div>
+                <div style="height:50px">Instructions</div></div>
+                <button id="submit" onclick="window.submits=1;document.querySelector('#success').hidden=false">Submit</button>
+                <div id="success" hidden>Passed</div>''')
+                async def solver(image):
+                    return 'coordinate:x=10,y=10;x=10,y=70' if outside else 'coordinate:x=10,y=10'
+                spec = Challenge('coordinates', '#capture', '#submit', '#success', click_area_selector='#picture')
+                if outside:
+                    with pytest.raises(CaptchaError, match='coordinates_outside_click_area'):
+                        await solve_challenge(page, spec, solver, timeout=5)
+                    assert await page.evaluate('(window.clicks||0)+(window.submits||0)') == 0
+                else:
+                    assert await solve_challenge(page, spec, solver, timeout=5)
+                    assert await page.evaluate('window.clicks') == 1
+            finally:
+                await context.close()
+                await browser.close()
+    asyncio.run(run())

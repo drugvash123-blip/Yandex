@@ -16,6 +16,7 @@ class Challenge:
     input_selector: str | None = None
     frame_selector: str | None = None
     success_frame_selector: str | None = None
+    click_area_selector: str | None = None
 
 
 async def solve_challenge(page, challenge, solve, *, timeout=30):
@@ -71,6 +72,18 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
                 await field.fill(answer)
             else:
                 points = parse_coordinates(answer, box['width'], box['height'])
+                if challenge.click_area_selector:
+                    area = scope.locator(challenge.click_area_selector)
+                    if await area.count() != 1 or not await area.is_visible():
+                        raise CaptchaError('click_area_unavailable')
+                    area_box = await area.bounding_box()
+                    if area_box is None:
+                        raise CaptchaError('click_area_unavailable')
+                    # Validate every point before performing any click. The screenshot
+                    # may contain instructions and controls outside the allowed image.
+                    if any(not (area_box['x'] <= new_box['x'] + x < area_box['x'] + area_box['width'] and
+                                area_box['y'] <= new_box['y'] + y < area_box['y'] + area_box['height']) for x, y in points):
+                        raise CaptchaError('coordinates_outside_click_area')
                 for x, y in points:
                     await image.click(position={'x': x, 'y': y})
             await submit.click()
