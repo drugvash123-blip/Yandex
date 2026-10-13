@@ -19,13 +19,13 @@ class Challenge:
     click_area_selector: str | None = None
 
 
-async def solve_challenge(page, challenge, solve, *, timeout=30):
+async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=None, action_pause=0, typing_delay_ms=0):
     """solve is an injected async callback(image_bytes); caller owns the paid budget.
 
     Explicit selectors make this testable without pretending that every current
     Yandex CAPTCHA layout is supported. No reloads or repeated submissions.
     """
-    if challenge.kind not in ('text', 'coordinates') or not challenge.success_selector:
+    if challenge.kind not in ('text', 'coordinates') or (not challenge.success_selector and wait_outcome is None):
         raise CaptchaError('unsupported_challenge')
     try:
         async with asyncio.timeout(timeout):
@@ -41,12 +41,12 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
                 success_scope = page.frame_locator(challenge.success_frame_selector)
             image = scope.locator(challenge.image_selector)
             submit = scope.locator(challenge.submit_selector)
-            success = success_scope.locator(challenge.success_selector)
+            success = success_scope.locator(challenge.success_selector) if challenge.success_selector else None
             if await image.count() != 1 or await submit.count() != 1:
                 raise CaptchaError('ambiguous_controls')
             if not await image.is_visible() or not await submit.is_visible() or not await submit.is_enabled():
                 raise CaptchaError('controls_unavailable')
-            if await success.count() and await success.first.is_visible():
+            if success is not None and await success.count() and await success.first.is_visible():
                 raise CaptchaError('success_already_visible')
             field = None
             if challenge.kind == 'text':
@@ -69,7 +69,11 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
             if challenge.kind == 'text':
                 if not answer.strip() or len(answer) > 120 or '\n' in answer or '\r' in answer:
                     raise CaptchaError('invalid_text_answer')
-                await field.fill(answer)
+                if typing_delay_ms:
+                    await field.fill('')
+                    await field.press_sequentially(answer, delay=typing_delay_ms)
+                else:
+                    await field.fill(answer)
             else:
                 points = parse_coordinates(answer, box['width'], box['height'])
                 if challenge.click_area_selector:
@@ -85,12 +89,19 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
                                 area_box['y'] <= new_box['y'] + y < area_box['y'] + area_box['height']) for x, y in points):
                         raise CaptchaError('coordinates_outside_click_area')
                 for x, y in points:
+                    if action_pause:
+                        await asyncio.sleep(action_pause)
                     await image.click(position={'x': x, 'y': y})
+            if action_pause:
+                await asyncio.sleep(action_pause)
             await submit.click()
             # A union selector can have a hidden error marker before a visible
             # outcome. Waiting on .first would then miss the actual outcome.
-            while not any([await item.is_visible() for item in await success.all()]):
-                await asyncio.sleep(0.1)
+            if wait_outcome is not None:
+                await wait_outcome()
+            else:
+                while not any([await item.is_visible() for item in await success.all()]):
+                    await asyncio.sleep(0.1)
             return True
     except TimeoutError:
         raise CaptchaError('browser_deadline_exceeded') from None

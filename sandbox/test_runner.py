@@ -431,6 +431,8 @@ def test_injected_captcha_search_flow(local_site, tmp_path, query, expected):
     assert len(calls) == (0 if query == "auto-failure" else 1)
     outcome = "handler_failed" if query == "auto-failure" else "handler_returned"
     assert [e['event'] for e in result.captcha_events] == ['handler_attempt', outcome]
+    saved_events = json.loads((Path(result.artifacts) / 'captcha-events.json').read_text())
+    assert saved_events == result.captcha_events
     if expected == 'found':
         assert '/target' in result.visited_url
         assert any(path.startswith('/target') for path in local_site.requests)

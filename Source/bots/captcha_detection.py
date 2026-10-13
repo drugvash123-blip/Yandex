@@ -10,10 +10,12 @@ async def inspect_captcha(page):
     candidates = []
     for index, frame in enumerate(page.frames):
         try:
+            frame_title = None
             if frame != page.main_frame:
                 element = await frame.frame_element()
                 if not await element.is_visible():
                     continue
+                frame_title = await element.get_attribute('title')
             state = await frame.evaluate('''() => {
                 const visible = el => !!el && el.getClientRects().length > 0 &&
                     getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
@@ -36,12 +38,20 @@ async def inspect_captcha(page):
                         ready:(kind === 'text' || kind === 'silhouette') && imageReady && controlsReady && views.length === 1};
                 });
             }''')
-            candidates.extend({'frame_index': index, **item} for item in state)
+            candidates.extend({'frame_index': index, 'frame_title': frame_title, **item} for item in state)
         except BrowserError:
             return {'state': 'changing', 'candidates': candidates}
+    # The demo keeps its checkbox visible while a separate advanced frame is open.
+    # Only this observed, unique pair is treated as one active challenge.
+    auxiliary = []
+    if len(candidates) == 2:
+        checkbox = [c for c in candidates if c['kind'] == 'checkbox' and c['frame_title'] == 'SmartCaptcha checkbox']
+        advanced = [c for c in candidates if c['kind'] in ('text', 'silhouette', 'unknown') and c['frame_title'] == 'SmartCaptcha advanced']
+        if len(checkbox) == len(advanced) == 1:
+            auxiliary, candidates = checkbox, advanced
     if not candidates:
         return {'state': 'unrecognized', 'candidates': []}
     if len(candidates) != 1:
         return {'state': 'ambiguous', 'candidates': candidates}
     candidate = candidates[0]
-    return {'state': 'ready' if candidate['ready'] else 'manual_required', 'candidates': candidates}
+    return {'state': 'ready' if candidate['ready'] else 'manual_required', 'candidates': candidates, 'auxiliary': auxiliary}

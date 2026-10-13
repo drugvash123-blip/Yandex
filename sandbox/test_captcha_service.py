@@ -19,7 +19,7 @@ class FakeSession:
         reply = next(self.replies)
         if isinstance(reply, Exception):
             raise reply
-        return SimpleNamespace(text=reply, is_redirect=False, raise_for_status=lambda: None)
+        return SimpleNamespace(text=reply, status_code=200, is_redirect=False, raise_for_status=lambda: None)
 
 
 def client(replies, **kwargs):
@@ -57,6 +57,7 @@ def test_solve_and_single_submission():
     assert session.calls == []
     assert service.solve_image(b'image') == 'word'
     assert len(session.calls) == 3
+    assert service.exchanges == [{'phase': 'submit', 'http_status': 200}, {'phase': 'poll', 'http_status': 200}, {'phase': 'poll', 'http_status': 200}]
     assert session.calls[0][1]['json']['body'] == 'aW1hZ2U='
     assert all(call[1]['allow_redirects'] is False for call in session.calls)
     with pytest.raises(CaptchaError, match='submission_limit_reached'):
@@ -86,6 +87,7 @@ def test_ambiguous_failure_does_not_resubmit_or_leak_key():
     with pytest.raises(CaptchaError, match='submission_limit_reached'):
         service.solve_image(b'image')
     assert len(session.calls) == 1
+    assert service.exchanges == [{'phase': 'submit', 'error_type': 'Timeout'}]
 
 
 def test_bad_task_id_stops_before_polling():

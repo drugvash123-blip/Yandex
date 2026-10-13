@@ -76,6 +76,7 @@ class CaptchaService:
         if self.owns_session:
             self.session.trust_env = False
         self.submitted = False
+        self.exchanges = []
 
     def __enter__(self):
         return self
@@ -88,13 +89,17 @@ class CaptchaService:
         remaining = end - self.clock()
         if remaining <= 0:
             raise CaptchaTimeout('deadline_exceeded')
+        exchange = {'phase': 'submit' if path == '/in.php' else 'poll'}
+        self.exchanges.append(exchange)
         try:
             response = self.session.post(self.endpoint + path, json=fields,
                                          timeout=min(15, remaining / 2), allow_redirects=False)
+            exchange['http_status'] = response.status_code
             if response.is_redirect:
                 raise CaptchaError('redirect_rejected')
             response.raise_for_status()
-        except requests.RequestException:
+        except requests.RequestException as error:
+            exchange['error_type'] = type(error).__name__
             # Request exceptions can contain an API key or an entire URL.
             raise CaptchaError('transport_error') from None
         if self.clock() >= end:

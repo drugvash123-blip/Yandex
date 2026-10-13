@@ -84,3 +84,56 @@ def test_browser_startup_failure_is_saved_without_credentials(tmp_path):
     assert record["error"] == "net::ERR_TIMED_OUT"
     assert record["completed_tasks"] == 0
     assert "secret" not in json.dumps(record)
+
+
+def test_wait_for_empty_server_expires_without_browser_or_submission(monkeypatch, tmp_path):
+    import task_service
+    monkeypatch.setenv('BOT_SERVICE_KEY', 'sandbox-key')
+    client = Mock()
+    client.fetch.return_value = []
+    client.last_response = {'http_status': 200, 'body': ''}
+    monkeypatch.setattr(task_service, 'TaskService', Mock(return_value=client))
+    assert runner.main(['--fetch-tasks', '--wait-for-tasks', '0.01', '--output', str(tmp_path)]) == 2
+    runner.BrowserSession.assert_not_called()
+    client.submit.assert_not_called()
+
+
+def test_paid_solver_is_opt_in_and_injected_without_requests(monkeypatch, tmp_path):
+    import captcha_service
+    from captcha_handler import PaidSearchCaptchaHandler
+    key = tmp_path / 'key.txt'
+    key.write_text('local-test-key')
+    service = Mock()
+    service.submitted = False
+    service.exchanges = []
+    service.__enter__ = Mock(return_value=service)
+    service.__exit__ = Mock(return_value=None)
+    constructor = Mock(return_value=service)
+    monkeypatch.setattr(captcha_service, 'CaptchaService', constructor)
+    fake = AsyncMock(return_value=runner.Result('query', 'example.com', status='found'))
+    monkeypatch.setattr(runner, 'run_task', fake)
+    assert runner.main(['--query', 'query', '--domain', 'example.com', '--captcha-key-file', str(key), '--output', str(tmp_path)]) == 0
+    assert isinstance(fake.call_args.kwargs['captcha_handler'], PaidSearchCaptchaHandler)
+    service.solve_image.assert_not_called()
+
+
+def test_paid_budget_is_shared_across_batch_tasks(monkeypatch, tmp_path):
+    import captcha_service
+    tasks = tmp_path / 'tasks.json'
+    tasks.write_text(json.dumps([{'query': 'first'}, {'query': 'second'}]))
+    key = tmp_path / 'key.txt'
+    key.write_text('local-test-key')
+    service = Mock()
+    service.submitted = False
+    service.exchanges = []
+    service.__enter__ = Mock(return_value=service)
+    service.__exit__ = Mock(return_value=None)
+    monkeypatch.setattr(captcha_service, 'CaptchaService', Mock(return_value=service))
+    handlers = []
+    async def run(task, **kwargs):
+        handlers.append(kwargs['captcha_handler'])
+        service.submitted = True  # Simulate even an ambiguous submission failure.
+        return runner.Result(task.query, task.domain, status='found')
+    monkeypatch.setattr(runner, 'run_task', AsyncMock(side_effect=run))
+    assert runner.main(['--tasks-file', str(tasks), '--captcha-key-file', str(key), '--output', str(tmp_path)]) == 0
+    assert handlers[0] is not None and handlers[1] is None

@@ -46,6 +46,13 @@ def test_observed_layout_classification():
                 assert detection['candidates'][0]['frame_index'] == 1
                 await page.locator('iframe').evaluate("el=>el.hidden=true")
                 assert (await inspect_captcha(page))['state'] == 'unrecognized'
+                await page.set_content('<iframe title="SmartCaptcha checkbox"></iframe><iframe title="SmartCaptcha advanced"></iframe>')
+                await page.frames[1].set_content('<div class="CheckboxCaptcha">Checkbox</div>')
+                await page.frames[2].set_content(text)
+                paired = await inspect_captcha(page)
+                assert paired['state'] == 'ready'
+                assert paired['candidates'][0]['kind'] == 'text'
+                assert paired['auxiliary'][0]['kind'] == 'checkbox'
                 await page.set_content(text + '<iframe></iframe>')
                 await page.frames[1].set_content(text)
                 assert (await inspect_captcha(page))['state'] == 'ambiguous'

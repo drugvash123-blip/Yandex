@@ -193,13 +193,20 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
         budget.used = True
         result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
         try:
-            await handler(page)
+            outcome = await handler(page)
+            if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed'):
+                result.captcha_events.append({'event': 'handler_outcome', 'outcome': outcome['outcome']})
             result.captcha_events.append({'event': 'handler_returned', 'verified': False})
         except Exception as error:
             from captcha_service import CaptchaError
             code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
             result.captcha_events.append({'event': 'handler_failed', 'code': code})
-            LOG.info('CAPTCHA handler stopped; manual completion remains available')
+            LOG.info('CAPTCHA handler stopped (%s); manual completion remains available', code)
+        if result.artifacts:
+            try:
+                (Path(result.artifacts) / 'captcha-events.json').write_text(json.dumps(result.captcha_events, ensure_ascii=False, indent=2), encoding='utf-8')
+            except OSError:
+                LOG.warning('Could not save CAPTCHA events; continuing manual observation')
         # The handler's return is NOT proof of a solved challenge or usable SERP.
         await capture()
     if seconds:
@@ -634,12 +641,37 @@ async def save_page(context, directory):
         await save_snapshot(context.pages[-1], directory, "page")
 
 
+async def wait_for_tasks(service, wait_seconds, poll_interval):
+    """Bounded, sequential reads; never retries a statistics write."""
+    end = asyncio.get_running_loop().time() + wait_seconds
+    attempt = 0
+    while True:
+        attempt += 1
+        tasks = await asyncio.to_thread(service.fetch)
+        response = getattr(service, 'last_response', None) or {}
+        LOG.info('Task fetch %s: received %s; HTTP %s; body length %s', attempt, len(tasks),
+                 response.get('http_status'), len(response.get('body', '')))
+        if tasks or not wait_seconds:
+            return tasks
+        remaining = end - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return []
+        await asyncio.sleep(min(poll_interval, remaining))
+        if asyncio.get_running_loop().time() >= end:
+            return []
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Finite Playwright search runner")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--query")
     source.add_argument("--tasks-file", type=Path, help="JSON array of query/domain tasks")
     source.add_argument("--fetch-tasks", action="store_true", help="Fetch one batch from the original service")
+    parser.add_argument("--wait-for-tasks", type=float, default=0, help="Seconds to wait for nonempty server tasks")
+    parser.add_argument("--task-poll-interval", type=float, default=60)
+    parser.add_argument("--captcha-key-file", type=Path, help="Explicit opt-in to at most one paid CAPTCHA per batch")
+    parser.add_argument("--captcha-kinds", choices=("text", "silhouette", "both"), default="both")
+    parser.add_argument("--captcha-endpoint", default="https://api.cap.guru")
     parser.add_argument("--domain", help="Target domain; omitted for a random organic result")
     parser.add_argument("--limit-tasks", type=int, default=10)
     parser.add_argument("--upload-stats", action="store_true")
@@ -681,8 +713,19 @@ def main(argv=None):
         parser.error("typing-delay-ms must be 0..2000")
     if args.action_pause < 0 or args.visit_seconds < 0:
         parser.error("action-pause and visit-seconds must be nonnegative")
+    if args.wait_for_tasks < 0 or args.task_poll_interval < 30 or (args.wait_for_tasks and not args.fetch_tasks):
+        parser.error("wait-for-tasks requires fetch-tasks; poll interval must be at least 30 seconds")
+    if args.captcha_key_file and args.deadline < 180:
+        parser.error("Paid CAPTCHA requires a task deadline of at least 180 seconds")
+    captcha_key = None
     service = None
     try:
+        if args.captcha_key_file:
+            from captcha_service import CaptchaService
+            captcha_key = args.captcha_key_file.read_text(encoding="utf-8").strip()
+            # Validate without making requests.
+            with CaptchaService(captcha_key, endpoint=args.captcha_endpoint):
+                pass
         if args.fetch_tasks or args.upload_stats:
             from task_service import TaskService
             key = args.service_key_file.read_text(encoding="utf-8").strip() if args.service_key_file else os.environ.get("BOT_SERVICE_KEY")
@@ -709,24 +752,35 @@ def main(argv=None):
                     proxy[field] = value
     except (ValueError, TypeError, OSError) as exc:
         parser.error("Invalid configuration: " + type(exc).__name__)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    args.output.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=[logging.StreamHandler(), logging.FileHandler(args.output / "runner.log", encoding="utf-8")])
 
     async def batch():
         results = []
         failed = False
+        solver = None
         try:
-            batch_tasks = await asyncio.to_thread(service.fetch) if args.fetch_tasks else tasks
+            batch_tasks = await wait_for_tasks(service, args.wait_for_tasks, args.task_poll_interval) if args.fetch_tasks else tasks
             if not batch_tasks:
-                LOG.info("No tasks in batch")
-                return 0
+                LOG.info("No tasks in batch; waiting limit reached" if args.wait_for_tasks else "No tasks in batch")
+                return 2 if args.wait_for_tasks else 0
+            if captcha_key:
+                from captcha_service import CaptchaService
+                solver = CaptchaService(captcha_key, endpoint=args.captcha_endpoint)
             async with BrowserSession(headed=args.headed, mobile=args.mobile, proxy=proxy, profile=args.profile) as session:
                 for task in batch_tasks[:args.limit_tasks]:
                     for _ in range(args.repeat):
+                        captcha_handler = None
+                        if solver is not None and not solver.submitted:
+                            from captcha_handler import PaidSearchCaptchaHandler
+                            kinds = ("text", "silhouette") if args.captcha_kinds == "both" else (args.captcha_kinds,)
+                            captcha_handler = PaidSearchCaptchaHandler(solver, allowed_kinds=kinds)
                         result = await run_task(task, max_pages=args.max_pages, deadline=args.deadline,
                                                 headed=args.headed, mobile=args.mobile, click=args.click,
                                                 proxy=proxy, output=args.output, captcha_wait=args.captcha_wait, session=session,
                                                 typing_delay_ms=args.typing_delay_ms, action_pause=args.action_pause,
-                                                visit_seconds=args.visit_seconds)
+                                                visit_seconds=args.visit_seconds, captcha_handler=captcha_handler)
                         results.append(result)
                         print(json.dumps(asdict(result), ensure_ascii=False), flush=True)
                         completed = completed_search(result, args.max_pages)
@@ -774,6 +828,10 @@ def main(argv=None):
             LOG.error("Batch failed: %s; saved results are retained", error)
             return 2
         finally:
+            if solver is not None:
+                (args.output / 'captcha-service.json').write_text(json.dumps({
+                    'submission_attempted': solver.submitted, 'exchanges': solver.exchanges}, indent=2), encoding='utf-8')
+                solver.__exit__(None, None, None)
             if service:
                 service.session.close()
     return asyncio.run(batch())
