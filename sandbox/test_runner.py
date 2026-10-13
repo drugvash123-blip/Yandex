@@ -222,10 +222,14 @@ def test_capture_records_loaded_image(local_site, tmp_path):
     result = asyncio.run(run_task(Task("captcha-with-image", "example.com"), base_url=local_site.url,
                                  captcha_wait=3, deadline=20, output=tmp_path, typing_delay_ms=0))
     assert result.status == "captcha"
-    states = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*.json')]
+    states = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*.json') if not p.name.endswith('-diagnosis.json')]
     images = [image for state in states for frame in state for image in frame['images']]
     assert any(image['loaded'] and image['width'] == 30 for image in images)
     assert all('source' not in image and 'source_digest' in image for image in images)
+    diagnoses = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*-diagnosis.json')]
+    assert diagnoses
+    assert all(state['state'] == 'manual_required' for state in diagnoses)
+    assert any(candidate['image_ready'] for state in diagnoses for candidate in state['candidates'])
 
 
 @pytest.mark.parametrize("query,status", [("rate-limit-recovers", "found"), ("rate-limit", "rate_limited")])

@@ -16,6 +16,7 @@ import uuid
 
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError, async_playwright
 from diagnostics import NetworkJournal, safe_error, safe_url
+from captcha_detection import inspect_captcha
 
 LOG = logging.getLogger(__name__)
 
@@ -156,12 +157,14 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 for img in structure['images']:
                     img['source_digest'] = hashlib.sha256(img.pop('source').encode()).hexdigest()
                 frames.append({'url': safe_url(frame.url), **structure})
-            signature = json.dumps(frames, sort_keys=True)
+            detection = await inspect_captcha(page)
+            signature = json.dumps({'frames': frames, 'detection': detection}, sort_keys=True)
             if signature in captured:
                 return
             name = f'{capture_id}-{len(captured)}'
             directory = Path(result.artifacts)
             (directory / f'{name}.json').write_text(json.dumps(frames, ensure_ascii=False, indent=2))
+            (directory / f'{name}-diagnosis.json').write_text(json.dumps(detection, ensure_ascii=False, indent=2))
             await save_snapshot(page, directory, name)
             for i, frame in enumerate(page.frames):
                 (directory / f'{name}-frame-{i}.html').write_text(await frame.content(), encoding='utf-8')
