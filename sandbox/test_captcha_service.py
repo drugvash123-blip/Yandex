@@ -137,3 +137,20 @@ def test_legacy_polling_stops(monkeypatch):
         text='CAPCHA_NOT_READY', is_redirect=False, raise_for_status=lambda: None))
     with pytest.raises(CaptchaTimeout):
         timeLib.wait_captcha_response('test-secret', '123', timeout=15)
+
+
+def test_transient_poll_failure_reuses_accepted_task_without_submission():
+    service, session = client(['OK|123', requests.ConnectionError('included test-secret'), 'OK|answer'])
+    assert service.solve_image(b'image') == 'answer'
+    assert service.task_id == '123'
+    assert [url.rsplit('/', 1)[-1] for url, _ in session.calls] == ['in.php', 'res.php', 'res.php']
+    assert [kwargs['json']['id'] for _, kwargs in session.calls[1:]] == ['123', '123']
+    assert 'test-secret' not in str(service.exchanges)
+
+
+def test_transient_poll_failures_remain_bounded():
+    service, session = client(['OK|123', requests.ConnectionError(), requests.Timeout()], max_polls=2)
+    with pytest.raises(CaptchaError, match='transport_error'):
+        service.solve_image(b'image')
+    assert service.task_id == '123'
+    assert len(session.calls) == 3

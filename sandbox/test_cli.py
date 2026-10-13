@@ -106,6 +106,7 @@ def test_paid_solver_is_opt_in_and_injected_without_requests(monkeypatch, tmp_pa
     service = Mock()
     service.submitted = False
     service.exchanges = []
+    service.task_id = None
     service.__enter__ = Mock(return_value=service)
     service.__exit__ = Mock(return_value=None)
     constructor = Mock(return_value=service)
@@ -126,6 +127,7 @@ def test_paid_budget_is_shared_across_batch_tasks(monkeypatch, tmp_path):
     service = Mock()
     service.submitted = False
     service.exchanges = []
+    service.task_id = None
     service.__enter__ = Mock(return_value=service)
     service.__exit__ = Mock(return_value=None)
     monkeypatch.setattr(captcha_service, 'CaptchaService', Mock(return_value=service))

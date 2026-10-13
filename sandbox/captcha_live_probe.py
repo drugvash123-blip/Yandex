@@ -68,6 +68,7 @@ async def run(args):
             finally:
                 result['submission_attempted'] = service.submitted
                 result['exchanges'] = service.exchanges
+                result['task_id'] = service.task_id
                 (directory / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2))
                 journal.close()
                 print(json.dumps({**result, 'artifacts': str(directory.resolve())}, ensure_ascii=False), flush=True)

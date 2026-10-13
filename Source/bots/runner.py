@@ -830,7 +830,7 @@ def main(argv=None):
         finally:
             if solver is not None:
                 (args.output / 'captcha-service.json').write_text(json.dumps({
-                    'submission_attempted': solver.submitted, 'exchanges': solver.exchanges}, indent=2), encoding='utf-8')
+                    'submission_attempted': solver.submitted, 'task_id': solver.task_id, 'exchanges': solver.exchanges}, indent=2), encoding='utf-8')
                 solver.__exit__(None, None, None)
             if service:
                 service.session.close()

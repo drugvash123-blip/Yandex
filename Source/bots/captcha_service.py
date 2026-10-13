@@ -76,6 +76,7 @@ class CaptchaService:
         if self.owns_session:
             self.session.trust_env = False
         self.submitted = False
+        self.task_id = None
         self.exchanges = []
 
     def __enter__(self):
@@ -125,12 +126,22 @@ class CaptchaService:
         ready, task_id = self._request('/in.php', fields, end)
         if not ready or not re.fullmatch(r'\d+', task_id):
             raise CaptchaError('invalid_task_id')
-        for _ in range(self.max_polls):
+        self.task_id = task_id
+        import logging
+        logging.getLogger(__name__).info('CAPTCHA accepted task id: %s', task_id)
+        for attempt in range(self.max_polls):
             remaining = end - self.clock()
             if remaining <= self.poll_interval:
                 raise CaptchaTimeout('deadline_exceeded')
             self.sleep(self.poll_interval)
-            ready, answer = self._request('/res.php', {'key': self.key, 'action': 'get', 'id': task_id, 'json': 1}, end)
+            try:
+                ready, answer = self._request('/res.php', {'key': self.key, 'action': 'get', 'id': task_id, 'json': 1}, end)
+            except CaptchaError:
+                # Reading an existing answer cannot create or charge another task.
+                transient = self.exchanges[-1].get('error_type') in ('ConnectionError', 'Timeout', 'ReadTimeout', 'ConnectTimeout')
+                if transient and attempt + 1 < self.max_polls:
+                    continue
+                raise
             if ready:
                 return answer
         raise CaptchaTimeout('poll_limit_reached')
