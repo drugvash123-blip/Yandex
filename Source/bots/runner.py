@@ -65,6 +65,12 @@ class Result:
     search_complete: bool = False
     completion_reason: str | None = None
     page_checks: list[dict] = data_field(default_factory=list)
+    captcha_events: list[dict] = data_field(default_factory=list)
+
+
+@dataclass
+class CaptchaBudget:
+    used: bool = False
 
 
 async def captcha_present(page):
@@ -128,7 +134,7 @@ async def terminal_pager(page, current):
     }""", current)
 
 
-async def wait_captcha(page, result, seconds):
+async def wait_captcha(page, result, seconds, handler=None, budget=None):
     if not await captcha_present(page):
         return True
     capture_id = 'captcha-' + uuid.uuid4().hex[:8]
@@ -164,6 +170,20 @@ async def wait_captcha(page, result, seconds):
         except (BrowserError, OSError):
             LOG.info('CAPTCHA changed during capture; continuing observation')
     await capture()
+    if handler is not None and budget is not None and not budget.used:
+        # Consume before calling: a transport failure may already create a paid task.
+        budget.used = True
+        result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
+        try:
+            await handler(page)
+            result.captcha_events.append({'event': 'handler_returned', 'verified': False})
+        except Exception as error:
+            from captcha_service import CaptchaError
+            code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
+            result.captcha_events.append({'event': 'handler_failed', 'code': code})
+            LOG.info('CAPTCHA handler stopped; manual completion remains available')
+        # The handler's return is NOT proof of a solved challenge or usable SERP.
+        await capture()
     if seconds:
         LOG.info("Complete CAPTCHA in the browser; waiting up to %s seconds", seconds)
         try:
@@ -182,12 +202,13 @@ async def wait_captcha(page, result, seconds):
 
 
 async def search(page, task, result, base_url, max_pages, click, captcha_wait=0, directory=None, typing_delay_ms=0,
-                 action_pause=0, visit_seconds=0):
+                 action_pause=0, visit_seconds=0, captcha_handler=None):
     document = {"status": None}
     navigation_status = {}
     navigation_status_by_url = {}
     recovery_used = False
     seen_results = set()
+    captcha_budget = CaptchaBudget()
     def track_response(response):
         if response.request.is_navigation_request():
             navigation_status_by_url[response.url] = response.status
@@ -261,7 +282,7 @@ async def search(page, task, result, base_url, max_pages, click, captcha_wait=0,
                 result.status, result.detail = "navigation_timeout", "Homepage navigation exceeded its timeout"
                 return
         await page.locator("body").wait_for(state="attached", timeout=15000)
-        if not await wait_captcha(page, result, captcha_wait) or await http_failure():
+        if not await wait_captcha(page, result, captcha_wait, captcha_handler, captcha_budget) or await http_failure():
             return
         # The original scenario enters the query through the homepage's real search form.
         close = page.locator('.Distribution-ButtonClose:visible').first
@@ -297,7 +318,7 @@ async def search(page, task, result, base_url, max_pages, click, captcha_wait=0,
             if index and await captcha_present(page):
                 result.status, result.detail = "captcha", "CAPTCHA during pagination; further navigation stopped"
                 return
-            if not await wait_captcha(page, result, captcha_wait) or await http_failure():
+            if not await wait_captcha(page, result, captcha_wait, captcha_handler, captcha_budget) or await http_failure():
                 return
             links = page.locator(RESULT_LINKS)
             try:
@@ -539,7 +560,7 @@ class BrowserSession:
 async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
                    deadline=60, headed=False, mobile=False, click=True,
                    channel="chrome", proxy=None, output=Path("sandbox/artifacts"), captcha_wait=0,
-                   session=None, typing_delay_ms=1000, action_pause=0, visit_seconds=0):
+                   session=None, typing_delay_ms=1000, action_pause=0, visit_seconds=0, captcha_handler=None):
     output = Path(output)
     directory = output / uuid.uuid4().hex
     directory.mkdir(parents=True, exist_ok=True)
@@ -560,7 +581,7 @@ async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
                 page = context.pages[0] if context.pages else await context.new_page()
                 (directory / "session.json").write_text(json.dumps(await session.metadata(page), ensure_ascii=False, indent=2), encoding="utf-8")
                 await search(page, task, result, base_url, max_pages, click, captcha_wait, directory, typing_delay_ms,
-                             action_pause, visit_seconds)
+                             action_pause, visit_seconds, captcha_handler)
         except TimeoutError:
             result.status, result.detail = "timeout", "Task deadline exceeded"
         except Exception as exc:

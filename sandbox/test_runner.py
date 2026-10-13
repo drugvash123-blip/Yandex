@@ -58,6 +58,21 @@ def local_site():
             elif query == "http-error":
                 status = 503
                 html = '<title>Unavailable</title>'
+            elif query.startswith("auto-") and "passed" not in args:
+                if query == "auto-next" and "round" in args:
+                    html = '<title>Вы не робот?</title><div class="AdvancedCaptcha" id="next-challenge">New challenge</div>'
+                else:
+                    destination = '/search?' + urlencode({'text': query, 'passed': 1})
+                    if query == "auto-next":
+                        destination = '/search?' + urlencode({'text': query, 'round': 2})
+                    html = f'''<title>Вы не робот?</title><div class="AdvancedCaptcha">
+                    <div class="AdvancedCaptcha-View" style="width:100px;height:50px;background:red"></div>
+                    <div class="Textinput"><input></div><button class="CaptchaButton_view_action"
+                    onclick="if(document.querySelector('input').value==='answer') location.href='{destination}';else document.querySelector('#incorrect').hidden=false">Check</button>
+                    <p id="incorrect" hidden>Incorrect answer</p></div>'''
+            elif query == "auto-429" and args.get("passed") == ["1"]:
+                status = 429
+                html = '<title>429</title><p id="rate-limit">Too many requests</p><script>setTimeout(()=>location.search=location.search.replace("passed=1","passed=2"),700)</script>'
             elif query == "captcha":
                 html = '<title>Вы не робот?</title><div class="CheckboxCaptcha"></div>'
             elif query == "captcha-with-image":
@@ -382,3 +397,43 @@ def test_navigation_after_runner_stops_is_captured_separately(local_site, tmp_pa
             assert any(r["event"] == "response" and "/search" in r["url"] and r["http_status"] == 200 for r in rows)
             assert result.status == "captcha"
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("auto-success", "found"), ("auto-next", "captcha"),
+    ("auto-wrong", "captcha"), ("auto-429", "found"),
+    ("auto-failure", "captcha"),
+])
+def test_injected_captcha_search_flow(local_site, tmp_path, query, expected):
+    from captcha_browser import Challenge, solve_challenge
+    calls = []
+
+    async def solver(image):
+        assert image.startswith(b"\x89PNG")
+        calls.append(image)
+        return "wrong" if query == "auto-wrong" else "answer"
+
+    async def handler(page):
+        if query == "auto-failure":
+            from captcha_service import CaptchaError
+            raise CaptchaError("transport_failed")
+        # This selector means an outcome appeared, not that CAPTCHA succeeded.
+        challenge = Challenge('text', '.AdvancedCaptcha-View', '.CaptchaButton_view_action',
+                              '.OrganicTitle-Link, #next-challenge, #incorrect, #rate-limit',
+                              input_selector='.Textinput input')
+        await solve_challenge(page, challenge, solver, timeout=5)
+
+    result = asyncio.run(run_task(Task(query, "127.0.0.1"), base_url=local_site.url,
+                                 click=True, max_pages=1, deadline=25, captcha_wait=3,
+                                 output=tmp_path, typing_delay_ms=0, captcha_handler=handler))
+    assert result.status == expected
+    assert len(calls) == (0 if query == "auto-failure" else 1)
+    outcome = "handler_failed" if query == "auto-failure" else "handler_returned"
+    assert [e['event'] for e in result.captcha_events] == ['handler_attempt', outcome]
+    if expected == 'found':
+        assert '/target' in result.visited_url
+        assert any(path.startswith('/target') for path in local_site.requests)
+    else:
+        assert result.pages_checked == 0
+        assert not result.visited_url
+        assert not any(path.startswith('/target') for path in local_site.requests)
