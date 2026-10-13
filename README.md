@@ -1,5 +1,7 @@
 # Yandex browser runner
 
+Инструкция переноса и полного запуска: [DEPLOY.md](DEPLOY.md).
+
 Конечный runner на Python 3.11+ и Playwright. Поиск выполняется в настоящем
 Chrome. Внутри одного пакета задания используют общий browser context и cookies;
 разные пакеты изолированы друг от друга.
