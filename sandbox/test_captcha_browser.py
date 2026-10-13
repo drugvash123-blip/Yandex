@@ -1,0 +1,48 @@
+import asyncio
+from pathlib import Path
+import sys
+
+import pytest
+from playwright.async_api import async_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Source/bots'))
+from captcha_browser import Challenge, solve_challenge
+from captcha_service import CaptchaError
+
+
+@pytest.mark.parametrize('case', ['text', 'coordinates', 'changed', 'wrong', 'out-of-bounds', 'missing-input'])
+def test_local_browser_challenge(case):
+    async def run():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(channel='chrome', headless=True, args=['--no-proxy-server'])
+            context = await browser.new_context(device_scale_factor=2, offline=True)
+            try:
+                page = await context.new_page()
+                await page.set_content('''<div id="image" style="width:100px;height:50px;background:#abc"
+                    onclick="window.points=(window.points||0)+1">Example</div>
+                    <input id="answer"><button id="submit" onclick="window.submits=(window.submits||0)+1;
+                    if(document.querySelector('#answer').value==='correct'||window.points===2)
+                    document.querySelector('#success').hidden=false">Submit</button>
+                    <div id="success" hidden>Completed</div>''')
+                calls = []
+                async def fake_solver(image):
+                    calls.append(image)
+                    if case == 'changed':
+                        await page.locator('#image').evaluate("el=>el.style.background='#f00'")
+                    if case in ('coordinates', 'out-of-bounds'):
+                        return 'coordinate:x=10,y=10;x=50,y=20' if case == 'coordinates' else 'coordinate:x=100,y=10'
+                    return 'wrong' if case == 'wrong' else 'correct'
+                kind = 'coordinates' if case in ('coordinates', 'out-of-bounds') else 'text'
+                spec = Challenge(kind, '#image', '#submit', '#success', '#missing' if case == 'missing-input' else '#answer')
+                if case in ('text', 'coordinates'):
+                    assert await solve_challenge(page, spec, fake_solver, timeout=5)
+                    assert await page.evaluate('window.submits') == 1
+                else:
+                    with pytest.raises(CaptchaError):
+                        await solve_challenge(page, spec, fake_solver, timeout=2)
+                    assert await page.evaluate('window.submits||0') == (1 if case == 'wrong' else 0)
+                assert len(calls) == (0 if case == 'missing-input' else 1)
+            finally:
+                await context.close()
+                await browser.close()
+    asyncio.run(run())

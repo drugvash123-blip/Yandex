@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import base64
 import datetime
 import http
@@ -42,7 +44,10 @@ def analytic_request(path, data):
     return conn
 
 
-botsKey = "651654adrgagdfgadg81513489198161351"
+botsKey = os.environ.get("BOT_SERVICE_KEY")
+_service_key_path = Path(__file__).resolve().parents[2] / "Data/service-key.txt"
+if not botsKey and _service_key_path.is_file():
+    botsKey = _service_key_path.read_text().strip()
 
 def get_task():
     try:
@@ -94,7 +99,7 @@ class Bot:
                         old = self.driver.execute_script("return window.__SSR_DATA__.imageSrc;")
                         print("Slider Captcha...")
                         id = requests.post("http://api.cap.guru/in.php", json={
-                            "key": "7b7a290e4e602b1deeaa924b963c6683",
+                            "key": key,
                             "method": "base64",
                             "click": "oth2",
                             "textinstructions": self.driver.execute_script(

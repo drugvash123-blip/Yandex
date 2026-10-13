@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+.venv/
+__pycache__/
+.pytest_cache/
+Data/logs.txt
+Data/proxy.txt
+Data/proxy.json
+Data/service-key.txt
+Data/browser-profiles/
+Data/cache/
+Data/extensions/
+sandbox/artifacts/
+Data/key.txt

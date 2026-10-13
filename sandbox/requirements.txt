@@ -1,0 +1,6 @@
+selenium>=4.20,<5
+requests>=2.31,<3
+fake-useragent>=2,<3
+pytest>=8,<10
+playwright>=1.50,<2
+PySocks>=1.7,<2

@@ -1,0 +1,102 @@
+{
+  "date": "2026-10-13",
+  "query": "мебель из массива сосны",
+  "proxy_ip": "84.247.60.125",
+  "consecutive_successes": 5,
+  "scope": "Successful main search/visit scenarios; background resource failures recorded separately; manual CAPTCHA allowed. One B run and four A runs, not a statistical reliability estimate.",
+  "runs": [
+    {
+      "run": 1,
+      "variant": "B",
+      "pause_seconds": 30,
+      "artifact": "6d9d9316df064e48ac5b70fec5b9179a",
+      "status": "found",
+      "page": 3,
+      "position": 2,
+      "visited_url": "https://dms-spb.ru/",
+      "target_http_status": 200,
+      "manual_captcha": true,
+      "main_navigation_errors": 0,
+      "subresource_failures": {
+        "yandex.ru net::ERR_ABORTED": 1,
+        "hdrc.yandex.net net::ERR_TIMED_OUT": 1,
+        "quic.egress.yandex.net net::ERR_TIMED_OUT": 1,
+        "img.dms-spb.ru net::ERR_ABORTED": 17,
+        "privacy-cs.mail.ru net::ERR_ABORTED": 2
+      }
+    },
+    {
+      "run": 2,
+      "variant": "A",
+      "pause_seconds": 15,
+      "artifact": "f9d1e8e5fec4475ca73491a83fa6b993",
+      "status": "found",
+      "page": 2,
+      "position": 3,
+      "visited_url": "https://dms-spb.ru/",
+      "target_http_status": 200,
+      "manual_captcha": true,
+      "main_navigation_errors": 0,
+      "subresource_failures": {
+        "hdrc.yandex.net net::ERR_TIMED_OUT": 1,
+        "quic.egress.yandex.net net::ERR_TIMED_OUT": 1,
+        "img.dms-spb.ru net::ERR_ABORTED": 17,
+        "privacy-cs.mail.ru net::ERR_ABORTED": 2
+      }
+    },
+    {
+      "run": 3,
+      "variant": "A",
+      "pause_seconds": 15,
+      "artifact": "cf4f154ee8a746819b87f2eb25327e6d",
+      "status": "found",
+      "page": 2,
+      "position": 5,
+      "visited_url": "https://dms-spb.ru/",
+      "target_http_status": 200,
+      "manual_captcha": false,
+      "main_navigation_errors": 0,
+      "subresource_failures": {
+        "hdrc.yandex.net net::ERR_TIMED_OUT": 1,
+        "quic.egress.yandex.net net::ERR_TIMED_OUT": 1,
+        "img.dms-spb.ru net::ERR_ABORTED": 17
+      }
+    },
+    {
+      "run": 4,
+      "variant": "A",
+      "pause_seconds": 15,
+      "artifact": "91e7f39385ec48cf8ed8367a1a30bd14",
+      "status": "found",
+      "page": 2,
+      "position": 7,
+      "visited_url": "https://dms-spb.ru/",
+      "target_http_status": 200,
+      "manual_captcha": false,
+      "main_navigation_errors": 0,
+      "subresource_failures": {
+        "hdrc.yandex.net net::ERR_TIMED_OUT": 1,
+        "quic.egress.yandex.net net::ERR_TIMED_OUT": 1,
+        "img.dms-spb.ru net::ERR_ABORTED": 17
+      }
+    },
+    {
+      "run": 5,
+      "variant": "A",
+      "pause_seconds": 15,
+      "artifact": "880c44fcbd65495e836751c071b6cd67",
+      "status": "found",
+      "page": 2,
+      "position": 5,
+      "visited_url": "https://dms-spb.ru/",
+      "target_http_status": 200,
+      "manual_captcha": false,
+      "main_navigation_errors": 0,
+      "subresource_failures": {
+        "hdrc.yandex.net net::ERR_TIMED_OUT": 1,
+        "quic.egress.yandex.net net::ERR_TIMED_OUT": 1,
+        "img.dms-spb.ru net::ERR_ABORTED": 17
+      }
+    }
+  ]
+}
