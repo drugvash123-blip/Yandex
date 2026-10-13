@@ -6,6 +6,7 @@ __pycache__/
 Data/logs.txt
 Data/proxy.txt
 Data/proxy.json
+Data/proxies.json
 Data/service-key.txt
 Data/browser-profiles/
 Data/cache/

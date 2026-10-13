@@ -13,6 +13,7 @@ def main():
     files += sorted((ROOT / 'Source').rglob('*.py'))
     files += sorted((ROOT / 'sandbox').glob('*.py'))
     files += sorted((ROOT / 'sandbox').glob('*.md'))
+    files += sorted((ROOT / 'sandbox').glob('requirements*.txt'))
     files += [ROOT / 'sandbox/tasks.example.json']
     output = ROOT / 'dist'
     output.mkdir(exist_ok=True)

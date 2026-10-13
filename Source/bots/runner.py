@@ -687,7 +687,8 @@ async def wait_for_tasks(service, wait_seconds, poll_interval):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Finite Playwright search runner")
+    parser = argparse.ArgumentParser(description="Finite Playwright search runner", allow_abbrev=False)
+    parser.add_argument('--validate-config', action='store_true', help=argparse.SUPPRESS)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--query")
     source.add_argument("--tasks-file", type=Path, help="JSON array of query/domain tasks")
@@ -780,6 +781,10 @@ def main(argv=None):
                     proxy[field] = value
     except (ValueError, TypeError, OSError) as exc:
         parser.error("Invalid configuration: " + type(exc).__name__)
+    if args.validate_config:
+        if service:
+            service.session.close()
+        return 0
     args.output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(args.output / "runner.log", encoding="utf-8")])
