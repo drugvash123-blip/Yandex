@@ -46,3 +46,39 @@ def test_local_browser_challenge(case):
                 await context.close()
                 await browser.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('duplicate', [False, True])
+def test_challenge_and_success_in_separate_frames(duplicate):
+    async def run():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(channel='chrome', headless=True, args=['--no-proxy-server'])
+            context = await browser.new_context(offline=True)
+            try:
+                page = await context.new_page()
+                await page.set_content('<iframe title="SmartCaptcha checkbox"></iframe><iframe title="SmartCaptcha advanced"></iframe>')
+                await page.locator('iframe[title="SmartCaptcha checkbox"]').evaluate('''el=>el.srcdoc=`<input id="js-button" class="CheckboxCaptcha-Button" role="checkbox" aria-checked="false">`''')
+                await page.locator('iframe[title="SmartCaptcha advanced"]').evaluate('''el=>el.srcdoc=`<div class="AdvancedCaptcha-View" style="width:100px;height:50px;background:#abc">Image</div>
+                  <div class="Textinput"><input class="Textinput-Control"></div>
+                  <button class="CaptchaButton_view_action" onclick="if(document.querySelector('input').value==='correct') parent.frames[0].document.querySelector('#js-button').setAttribute('aria-checked','true')">Submit</button>`''')
+                await page.frame_locator('iframe[title="SmartCaptcha advanced"]').locator('.Textinput-Control').wait_for()
+                if duplicate:
+                    await page.locator('iframe[title="SmartCaptcha advanced"]').evaluate('el=>el.after(el.cloneNode(true))')
+                calls = []
+                async def fake_solver(image):
+                    calls.append(image)
+                    return 'correct'
+                spec = Challenge('text', '.AdvancedCaptcha-View', '.CaptchaButton_view_action',
+                                 '#js-button[aria-checked="true"]', '.Textinput-Control',
+                                 'iframe[title="SmartCaptcha advanced"]', 'iframe[title="SmartCaptcha checkbox"]')
+                if duplicate:
+                    with pytest.raises(CaptchaError, match='ambiguous_challenge_frame'):
+                        await solve_challenge(page, spec, fake_solver, timeout=5)
+                    assert calls == []
+                else:
+                    assert await solve_challenge(page, spec, fake_solver, timeout=5)
+                    assert len(calls) == 1
+            finally:
+                await context.close()
+                await browser.close()
+    asyncio.run(run())

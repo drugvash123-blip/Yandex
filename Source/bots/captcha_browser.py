@@ -14,6 +14,8 @@ class Challenge:
     submit_selector: str
     success_selector: str
     input_selector: str | None = None
+    frame_selector: str | None = None
+    success_frame_selector: str | None = None
 
 
 async def solve_challenge(page, challenge, solve, *, timeout=30):
@@ -26,9 +28,19 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
         raise CaptchaError('unsupported_challenge')
     try:
         async with asyncio.timeout(timeout):
-            image = page.locator(challenge.image_selector)
-            submit = page.locator(challenge.submit_selector)
-            success = page.locator(challenge.success_selector)
+            scope = page
+            success_scope = page
+            if challenge.frame_selector:
+                if await page.locator(challenge.frame_selector).count() != 1:
+                    raise CaptchaError('ambiguous_challenge_frame')
+                scope = page.frame_locator(challenge.frame_selector)
+            if challenge.success_frame_selector:
+                if await page.locator(challenge.success_frame_selector).count() != 1:
+                    raise CaptchaError('ambiguous_success_frame')
+                success_scope = page.frame_locator(challenge.success_frame_selector)
+            image = scope.locator(challenge.image_selector)
+            submit = scope.locator(challenge.submit_selector)
+            success = success_scope.locator(challenge.success_selector)
             if await image.count() != 1 or await submit.count() != 1:
                 raise CaptchaError('ambiguous_controls')
             if not await image.is_visible() or not await submit.is_visible() or not await submit.is_enabled():
@@ -39,7 +51,7 @@ async def solve_challenge(page, challenge, solve, *, timeout=30):
             if challenge.kind == 'text':
                 if not challenge.input_selector:
                     raise CaptchaError('missing_input')
-                field = page.locator(challenge.input_selector)
+                field = scope.locator(challenge.input_selector)
                 if await field.count() != 1 or not await field.is_visible() or not await field.is_editable():
                     raise CaptchaError('input_unavailable')
             before = await image.screenshot(scale='css', animations='disabled')
