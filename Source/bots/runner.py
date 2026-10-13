@@ -87,7 +87,9 @@ async def captcha_present(page):
 
 
 SEARCH_INPUT = 'input[name="text"]:visible, textarea[name="text"]:visible, input.input__control:visible, input[type="search"]:visible'
-RESULT_LINKS = '.serp-item:not(.serp-item_type_ad) a.OrganicTitle-Link, .serp-item:not(.serp-item_type_ad) h2 a, .serp-item:not(.serp-item_type_ad) a.organic__url'
+# Vertical blocks (for example Images) share h2 markup with website results.
+RESULT_CARDS = '.serp-item:not(.serp-item_type_ad):not(:has(.UniSearchHeader-Title))'
+RESULT_LINKS = ', '.join(f'{RESULT_CARDS} {anchor}' for anchor in ('a.OrganicTitle-Link', 'h2 a', 'a.organic__url'))
 
 
 def typing_timeout_ms(text, delay):
@@ -104,6 +106,19 @@ def query_matches(url, query):
         return " ".join(unicodedata.normalize("NFC", value).split())
     values = parse_qs(urlsplit(url).query).get("text", [])
     return len(values) == 1 and normalize(values[0]) == normalize(query)
+
+
+async def read_result_rows(links):
+    """One website title per card; retain locator indexes for actual clicks."""
+    return await links.evaluate_all("""els => {
+                const seen = new Set();
+                return els.flatMap((e, i) => {
+                    const card = e.closest('.serp-item');
+                    if (seen.has(card)) return [];
+                    seen.add(card);
+                    return [{url:e.href, text:e.textContent, locatorIndex:i}];
+                });
+    }""")
 
 
 def result_signature(rows):
@@ -342,15 +357,7 @@ async def search(page, task, result, base_url, max_pages, click, captcha_wait=0,
                 if await http_failure():
                     return
             # Keep one title per result card; breadcrumbs and duplicate anchors are not positions.
-            rows = await links.evaluate_all("""els => {
-                const seen = new Set();
-                return els.flatMap((e, i) => {
-                    const card = e.closest('.serp-item');
-                    if (seen.has(card)) return [];
-                    seen.add(card);
-                    return [{url:e.href, text:e.textContent, locatorIndex:i}];
-                });
-            }""")
+            rows = await read_result_rows(links)
             if not query_matches(page.url, task.query):
                 result.status, result.detail = "incomplete", "Results URL does not confirm the requested query"
                 return
