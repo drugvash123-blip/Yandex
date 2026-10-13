@@ -88,7 +88,8 @@ async def captcha_present(page):
 
 SEARCH_INPUT = 'input[name="text"]:visible, textarea[name="text"]:visible, input.input__control:visible, input[type="search"]:visible'
 # Vertical blocks (for example Images) share h2 markup with website results.
-RESULT_CARDS = '.serp-item:not(.serp-item_type_ad):not(:has(.UniSearchHeader-Title))'
+AD_REDIRECT_LINKS = ', '.join(f'a[href^="{scheme}//yabs.yandex.ru/count/"]' for scheme in ('https:', 'http:', ''))
+RESULT_CARDS = f'.serp-item:not(.serp-item_type_ad):not(:has(.UniSearchHeader-Title)):not(:has({AD_REDIRECT_LINKS}))'
 RESULT_LINKS = ', '.join(f'{RESULT_CARDS} {anchor}' for anchor in ('a.OrganicTitle-Link', 'h2 a', 'a.organic__url'))
 
 

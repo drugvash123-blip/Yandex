@@ -22,6 +22,7 @@ def test_website_positions_exclude_vertical_cards_and_ads():
                     <div class="serp-item serp-item_type_ad"><h2><a href="https://advert.example/">Ad</a></h2></div>
                     <div class="serp-item serp-item__extra-width serp-item_card"><h2><a class="UniSearchHeader-Title" href="https://ya.ru/images/search?text=test">Images</a></h2>
                         <a class="OrganicTitle-Link" href="https://inside-vertical.example/">Thumbnail</a></div>
+                    <div class="serp-item"><h2><a class="OrganicTitle-Link" href="https://yabs.yandex.ru/count/test">Ad without old class</a></h2></div>
                     <div class="serp-item"><h2><a href="https://second.example/">Fallback title</a></h2></div>
                     <div class="serp-item"><h2><a class="OrganicTitle-Link" href="https://dms-spb.ru/">Target</a></h2></div>
                     <div class="serp-item"><h2><a class="OrganicTitle-Link" href="https://yandex.ru/company/">Ordinary Yandex website result</a></h2></div>
@@ -55,6 +56,25 @@ def test_saved_live_page_website_positions():
                 assert not any('/images/search' in row['url'] for row in rows)
                 assert rows[7]['url'] == 'https://dms-spb.ru/'
                 assert await links.nth(rows[7]['locatorIndex']).get_attribute('href') == 'https://dms-spb.ru/'
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
+def test_saved_live_page_excludes_new_ad_redirect():
+    source = Path(__file__).parent / 'artifacts/captcha-silhouette-live2-20261013/9f3f561e5ce542b7a38796ec4e1f40d6/results-1.html'
+    if not source.exists():
+        pytest.skip('Private live artifact is unavailable')
+    async def run():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(channel='chrome', headless=True, args=['--no-proxy-server'])
+            context = await browser.new_context(offline=True, java_script_enabled=False)
+            try:
+                page = await context.new_page()
+                await page.set_content(source.read_text())
+                rows = await read_result_rows(page.locator(RESULT_LINKS))
+                assert len(rows) == 10
+                assert not any('yabs.yandex.ru' in row['url'] for row in rows)
             finally:
                 await browser.close()
     asyncio.run(run())
