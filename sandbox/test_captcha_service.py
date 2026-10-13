@@ -97,8 +97,9 @@ def test_bad_task_id_stops_before_polling():
     assert len(session.calls) == 1
 
 
-def test_coordinates():
-    assert parse_coordinates('coordinate:x=0,y=0;x=99,y=49', 100, 50) == [(0, 0), (99, 49)]
+@pytest.mark.parametrize('prefix', ['coordinate:', 'coordinates:'])
+def test_coordinates(prefix):
+    assert parse_coordinates(prefix + 'x=0,y=0;x=99,y=49', 100, 50) == [(0, 0), (99, 49)]
 
 
 @pytest.mark.parametrize('answer', ['coordinate:x=100,y=0', 'coordinate:x=-1,y=0', 'coordinate:', 'OK|x=1,y=2', 'coordinate:x=1,y=2;broken'])

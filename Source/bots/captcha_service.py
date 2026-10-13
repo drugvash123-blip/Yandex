@@ -42,9 +42,12 @@ def parse_reply(text):
 
 
 def parse_coordinates(answer, width, height):
-    if width <= 0 or height <= 0 or not answer.startswith('coordinate:'):
+    if width <= 0 or height <= 0:
         raise CaptchaError('invalid_coordinates')
-    pieces = answer[len('coordinate:'):].split(';')
+    prefix = next((prefix for prefix in ('coordinate:', 'coordinates:') if answer.startswith(prefix)), None)
+    if prefix is None:
+        raise CaptchaError('invalid_coordinates')
+    pieces = answer[len(prefix):].split(';')
     if not 1 <= len(pieces) <= 50:
         raise CaptchaError('invalid_coordinates')
     points = []

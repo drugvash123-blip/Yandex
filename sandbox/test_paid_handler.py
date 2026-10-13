@@ -10,7 +10,7 @@ from captcha_handler import PaidSearchCaptchaHandler
 from captcha_service import CaptchaError
 
 
-@pytest.mark.parametrize('kind', ['text', 'silhouette', 'bad-coordinates'])
+@pytest.mark.parametrize('kind', ['text', 'silhouette', 'silhouette-plural', 'bad-coordinates'])
 def test_paid_handler_options_and_click_bounds(kind):
     async def run():
         async with async_playwright() as pw:
@@ -25,7 +25,11 @@ def test_paid_handler_options_and_click_bounds(kind):
                 def solve(image, **options):
                     calls.append(options)
                     assert image.startswith(b'\x89PNG')
-                    return 'answer' if kind == 'text' else ('coordinate:x=10,y=10' if kind == 'silhouette' else 'coordinate:x=10,y=100')
+                    if kind == 'text':
+                        return 'answer'
+                    if kind == 'silhouette-plural':
+                        return 'coordinates:x=10,y=10'
+                    return 'coordinate:x=10,y=10' if kind == 'silhouette' else 'coordinate:x=10,y=100'
                 handler = PaidSearchCaptchaHandler(SimpleNamespace(solve_image=solve), outcome_selector='#done', timeout=3, action_pause=0, typing_delay_ms=0)
                 if kind == 'bad-coordinates':
                     with pytest.raises(CaptchaError):
