@@ -188,6 +188,21 @@ def test_explicit_quota_uses_separate_single_submission_clients():
     assert all(len(session.calls) == 2 for session in created)
 
 
+def test_unlimited_quota_allows_more_than_three_separate_challenges():
+    from captcha_service import CaptchaQuota
+    created = []
+    def factory(key, endpoint):
+        service, session = client(['OK|' + str(len(created) + 1), 'OK|word'])
+        created.append(session)
+        return service
+    quota = CaptchaQuota('test-secret', endpoint='https://solver.invalid', max_tasks=0, factory=factory)
+    for _ in range(5):
+        assert quota.solve_image(b'new challenge') == 'word'
+    assert not quota.exhausted and quota.remaining == float('inf')
+    assert quota.task_id == '5'
+    assert all(len(session.calls) == 2 for session in created)
+
+
 def test_quota_admission_remains_bounded_for_concurrent_callers():
     from captcha_service import CaptchaQuota
     from concurrent.futures import ThreadPoolExecutor

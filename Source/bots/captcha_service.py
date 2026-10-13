@@ -153,8 +153,8 @@ class CaptchaService:
 class CaptchaQuota:
     """A batch-wide explicit spending limit; each image gets a single-use client."""
     def __init__(self, key, *, endpoint, max_tasks=1, factory=None):
-        if not 1 <= max_tasks <= 3:
-            raise ValueError('max_tasks must be 1..3')
+        if max_tasks < 0:
+            raise ValueError('max_tasks must be nonnegative; 0 means unlimited')
         self.key, self.endpoint, self.max_tasks = key, endpoint, max_tasks
         self.factory = factory or CaptchaService
         self.clients = []
@@ -163,7 +163,7 @@ class CaptchaQuota:
 
     @property
     def remaining(self):
-        return self.max_tasks - len(self.clients)
+        return self.max_tasks - len(self.clients) if self.max_tasks else float('inf')
 
     @property
     def exhausted(self):

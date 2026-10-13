@@ -61,6 +61,44 @@ class PaidSearchCaptchaHandler:
     def remaining_attempts(self):
         return getattr(self.service, 'remaining', 0)
 
+    async def refresh_challenge(self, page):
+        """Refresh once and verify a different loaded image before any paid retry."""
+        import asyncio
+        import hashlib
+        from playwright.async_api import Error as BrowserError
+        detection = await inspect_captcha(page)
+        if detection['state'] != 'ready':
+            raise CaptchaError('refresh_challenge_not_ready')
+        candidate = detection['candidates'][0]
+        scope = page
+        if candidate['frame_index']:
+            frames = page.locator('iframe[title="SmartCaptcha advanced"]')
+            if await frames.count() != 1:
+                raise CaptchaError('unsupported_challenge_frame')
+            element = await frames.element_handle()
+            if await element.content_frame() != page.frames[candidate['frame_index']]:
+                raise CaptchaError('unsupported_challenge_frame')
+            scope = page.frame_locator('iframe[title="SmartCaptcha advanced"]')
+        images = scope.locator('.AdvancedCaptcha:visible img')
+        async def signature():
+            raw = await images.evaluate_all('els=>els.map(e=>e.currentSrc||e.src).join("\\n")')
+            return hashlib.sha256(raw.encode()).hexdigest()
+        before = await signature()
+        button = scope.get_by_role('button', name='Обновить задание', exact=True)
+        if await button.count() != 1 or not await button.is_visible() or not await button.is_enabled():
+            raise CaptchaError('refresh_control_unavailable')
+        await asyncio.sleep(15)
+        await button.click()
+        for _ in range(120):
+            try:
+                state = await inspect_captcha(page)
+                if state['state'] == 'ready' and await signature() != before:
+                    return
+            except BrowserError:
+                pass
+            await asyncio.sleep(0.5)
+        raise CaptchaError('refresh_not_confirmed')
+
     async def __call__(self, page):
         import asyncio
         import hashlib
@@ -70,15 +108,17 @@ class PaidSearchCaptchaHandler:
         async def current():
             return await inspect_captcha(page)
 
-        detection = await current()
-        if detection['state'] == 'manual_required' and detection['candidates'][0]['kind'] == 'checkbox':
-            button = page.locator('.CheckboxCaptcha-Button:visible')
-            if detection['candidates'][0]['frame_index'] or await button.count() != 1:
-                raise CaptchaError('manual_checkbox_required')
-            await button.click()
+        checkbox_clicked = False
         # Images may load after the document and challenge controls appear.
         for _ in range(120):
             detection = await current()
+            if not checkbox_clicked and detection['state'] == 'manual_required' and detection['candidates'][0]['kind'] == 'checkbox':
+                button = page.locator('.CheckboxCaptcha-Button:visible')
+                if detection['candidates'][0]['frame_index'] or await button.count() != 1:
+                    raise CaptchaError('manual_checkbox_required')
+                await asyncio.sleep(self.action_pause)
+                await button.click()
+                checkbox_clicked = True
             if detection['state'] == 'ready':
                 break
             if detection['state'] == 'unrecognized' and not await captcha_present(page):
@@ -141,6 +181,23 @@ class PaidSearchCaptchaHandler:
                          input_selector=root + ' .Textinput input:visible' if kind == 'text' else None,
                          frame_selector=frame_selector,
                          click_area_selector=root + ' .AdvancedCaptcha-View:visible' if kind == 'silhouette' else None)
-        await solve_challenge(page, spec, solve, timeout=self.timeout, wait_outcome=outcome,
-                              action_pause=self.action_pause, typing_delay_ms=self.typing_delay_ms)
+        try:
+            await solve_challenge(page, spec, solve, timeout=self.timeout, wait_outcome=outcome,
+                                  action_pause=self.action_pause, typing_delay_ms=self.typing_delay_ms)
+        except CaptchaError as error:
+            if str(error) != 'browser_action_failed':
+                raise
+            # A browser action can race with replacement of the challenge.
+            # Continue only when a new ready image is actually observed.
+            for _ in range(40):
+                try:
+                    state = await current()
+                    if state['state'] == 'ready' and await sources() != initial_sources:
+                        return {'outcome': 'challenge_changed', 'outcome_observed': True, 'search_verified': False}
+                    if state['state'] == 'unrecognized' and not await captcha_present(page):
+                        return {'outcome': 'captcha_left', 'outcome_observed': True, 'search_verified': False}
+                except BrowserError:
+                    pass
+                await asyncio.sleep(0.5)
+            raise
         return {**observed, 'outcome_observed': True, 'search_verified': False}

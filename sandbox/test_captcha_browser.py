@@ -10,6 +10,26 @@ from captcha_browser import Challenge, solve_challenge
 from captcha_service import CaptchaError
 
 
+def test_submission_navigation_error_observes_outcome_without_reclick():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from playwright.async_api import Error
+    image = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True),
+                            screenshot=AsyncMock(return_value=b'image'),
+                            bounding_box=AsyncMock(return_value={'width': 100, 'height': 50}))
+    submit = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True),
+                             is_enabled=AsyncMock(return_value=True),
+                             click=AsyncMock(side_effect=Error('Execution context was destroyed')))
+    field = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True),
+                            is_editable=AsyncMock(return_value=True), fill=AsyncMock())
+    page = SimpleNamespace(locator=lambda selector: {'image': image, 'submit': submit, 'field': field}[selector])
+    outcome = AsyncMock()
+    challenge = Challenge('text', 'image', 'submit', '', input_selector='field')
+    assert asyncio.run(solve_challenge(page, challenge, AsyncMock(return_value='answer'), wait_outcome=outcome))
+    submit.click.assert_awaited_once()
+    outcome.assert_awaited_once()
+
+
 @pytest.mark.parametrize('case', ['text', 'coordinates', 'changed', 'wrong', 'out-of-bounds', 'missing-input'])
 def test_local_browser_challenge(case):
     async def run():

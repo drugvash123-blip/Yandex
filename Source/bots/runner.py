@@ -189,12 +189,14 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
         except (BrowserError, OSError):
             LOG.info('CAPTCHA changed during capture; continuing observation')
     await capture()
-    if handler is not None and budget is not None and not budget.used:
+    if handler is not None and budget is not None and (not budget.used or getattr(handler, 'remaining_attempts', 0) == float('inf')):
         # Consume before calling: a transport failure may already create a paid task.
         budget.used = True
-        for _ in range(3):
+        unsolvable_retries = 0
+        while True:
             result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
             outcome = None
+            retry_refreshed = False
             try:
                 outcome = await handler(page)
                 if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed'):
@@ -205,20 +207,34 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
                 result.captcha_events.append({'event': 'handler_failed', 'code': code})
                 LOG.info('CAPTCHA handler stopped (%s); manual completion remains available', code)
+                if code == 'ERROR_CAPTCHA_UNSOLVABLE' and unsolvable_retries < 1 and getattr(handler, 'remaining_attempts', 0) > 0:
+                    unsolvable_retries += 1
+                    try:
+                        await handler.refresh_challenge(page)
+                        result.captcha_events.append({'event': 'challenge_refreshed'})
+                        LOG.info('CAPTCHA refreshed and new loaded image confirmed; retrying recognition once')
+                        retry_refreshed = True
+                    except Exception as refresh_error:
+                        refresh_code = str(refresh_error) if isinstance(refresh_error, CaptchaError) else safe_error(refresh_error)
+                        result.captcha_events.append({'event': 'refresh_failed', 'code': refresh_code})
+                        LOG.info('CAPTCHA refresh stopped (%s); no paid retry', refresh_code)
             if result.artifacts:
                 try:
                     (Path(result.artifacts) / 'captcha-events.json').write_text(json.dumps(result.captcha_events, ensure_ascii=False, indent=2), encoding='utf-8')
                 except OSError:
                     LOG.warning('Could not save CAPTCHA events; continuing manual observation')
             await capture()
+            if retry_refreshed:
+                continue
             # Only a changed challenge after a completed submission can start
             # another paid stage. Transport/format failures never trigger this.
             if not (isinstance(outcome, dict) and outcome.get('outcome') == 'challenge_changed'
                     and getattr(handler, 'remaining_attempts', 0) > 0):
                 break
             LOG.info('New CAPTCHA stage; remaining paid limit: %s', handler.remaining_attempts)
+            unsolvable_retries = 0
             await asyncio.sleep(2)
-    if seconds:
+    if seconds and await captcha_present(page):
         LOG.info("Complete CAPTCHA in the browser; waiting up to %s seconds", seconds)
         try:
             async with asyncio.timeout(seconds):
@@ -678,8 +694,8 @@ def main(argv=None):
     source.add_argument("--fetch-tasks", action="store_true", help="Fetch one batch from the original service")
     parser.add_argument("--wait-for-tasks", type=float, default=0, help="Seconds to wait for nonempty server tasks")
     parser.add_argument("--task-poll-interval", type=float, default=60)
-    parser.add_argument("--captcha-key-file", type=Path, help="Explicit opt-in to at most one paid CAPTCHA per batch")
-    parser.add_argument("--captcha-max-tasks", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--captcha-key-file", type=Path, help="Explicit opt-in to paid CAPTCHA solving")
+    parser.add_argument("--captcha-max-tasks", type=int, default=1, help="Batch task limit; 0 means unlimited")
     parser.add_argument("--captcha-kinds", choices=("text", "silhouette", "both"), default="both")
     parser.add_argument("--captcha-endpoint", default="https://api.cap.guru")
     parser.add_argument("--domain", help="Target domain; omitted for a random organic result")
@@ -723,10 +739,12 @@ def main(argv=None):
         parser.error("typing-delay-ms must be 0..2000")
     if args.action_pause < 0 or args.visit_seconds < 0:
         parser.error("action-pause and visit-seconds must be nonnegative")
-    if args.wait_for_tasks < 0 or args.task_poll_interval < 30 or (args.wait_for_tasks and not args.fetch_tasks):
-        parser.error("wait-for-tasks requires fetch-tasks; poll interval must be at least 30 seconds")
+    if args.wait_for_tasks < 0 or args.task_poll_interval < 1 or (args.wait_for_tasks and not args.fetch_tasks):
+        parser.error("wait-for-tasks requires fetch-tasks; poll interval must be at least 1 second")
     if args.captcha_key_file and args.deadline < 180:
         parser.error("Paid CAPTCHA requires a task deadline of at least 180 seconds")
+    if args.captcha_max_tasks < 0:
+        parser.error("captcha-max-tasks must be nonnegative")
     captcha_key = None
     service = None
     try:

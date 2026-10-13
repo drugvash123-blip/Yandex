@@ -27,6 +27,7 @@ async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=No
     """
     if challenge.kind not in ('text', 'coordinates') or (not challenge.success_selector and wait_outcome is None):
         raise CaptchaError('unsupported_challenge')
+    phase = 'preflight'
     try:
         async with asyncio.timeout(timeout):
             scope = page
@@ -55,9 +56,12 @@ async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=No
                 field = scope.locator(challenge.input_selector)
                 if await field.count() != 1 or not await field.is_visible() or not await field.is_editable():
                     raise CaptchaError('input_unavailable')
+            phase = 'capture'
             before = await image.screenshot(scale='css', animations='disabled')
             box = await image.bounding_box()
+            phase = 'solver'
             answer = await solve(before)
+            phase = 'validate_image'
             after = await image.screenshot(scale='css', animations='disabled')
             if hashlib.sha256(before).digest() != hashlib.sha256(after).digest():
                 raise CaptchaError('challenge_changed')
@@ -66,6 +70,7 @@ async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=No
                 raise CaptchaError('image_size_changed')
             if not isinstance(answer, str):
                 raise CaptchaError('invalid_answer')
+            phase = 'answer_actions'
             if challenge.kind == 'text':
                 if not answer.strip() or len(answer) > 120 or '\n' in answer or '\r' in answer:
                     raise CaptchaError('invalid_text_answer')
@@ -94,7 +99,17 @@ async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=No
                     await image.click(position={'x': x, 'y': y})
             if action_pause:
                 await asyncio.sleep(action_pause)
-            await submit.click()
+            phase = 'submit'
+            try:
+                await submit.click()
+            except BrowserError:
+                if wait_outcome is None:
+                    raise
+                # Navigation can destroy the execution context after submission.
+                # Observe the page outcome without repeating the click.
+                import logging
+                logging.getLogger(__name__).info('CAPTCHA submit interrupted; observing outcome without resubmission')
+            phase = 'observe_outcome'
             # A union selector can have a hidden error marker before a visible
             # outcome. Waiting on .first would then miss the actual outcome.
             if wait_outcome is not None:
@@ -106,4 +121,6 @@ async def solve_challenge(page, challenge, solve, *, timeout=30, wait_outcome=No
     except TimeoutError:
         raise CaptchaError('browser_deadline_exceeded') from None
     except BrowserError:
+        import logging
+        logging.getLogger(__name__).info('CAPTCHA browser action failed at phase: %s', phase)
         raise CaptchaError('browser_action_failed') from None
