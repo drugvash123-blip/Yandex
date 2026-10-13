@@ -192,24 +192,32 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
     if handler is not None and budget is not None and not budget.used:
         # Consume before calling: a transport failure may already create a paid task.
         budget.used = True
-        result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
-        try:
-            outcome = await handler(page)
-            if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed'):
-                result.captcha_events.append({'event': 'handler_outcome', 'outcome': outcome['outcome']})
-            result.captcha_events.append({'event': 'handler_returned', 'verified': False})
-        except Exception as error:
-            from captcha_service import CaptchaError
-            code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
-            result.captcha_events.append({'event': 'handler_failed', 'code': code})
-            LOG.info('CAPTCHA handler stopped (%s); manual completion remains available', code)
-        if result.artifacts:
+        for _ in range(3):
+            result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
+            outcome = None
             try:
-                (Path(result.artifacts) / 'captcha-events.json').write_text(json.dumps(result.captcha_events, ensure_ascii=False, indent=2), encoding='utf-8')
-            except OSError:
-                LOG.warning('Could not save CAPTCHA events; continuing manual observation')
-        # The handler's return is NOT proof of a solved challenge or usable SERP.
-        await capture()
+                outcome = await handler(page)
+                if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed'):
+                    result.captcha_events.append({'event': 'handler_outcome', 'outcome': outcome['outcome']})
+                result.captcha_events.append({'event': 'handler_returned', 'verified': False})
+            except Exception as error:
+                from captcha_service import CaptchaError
+                code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
+                result.captcha_events.append({'event': 'handler_failed', 'code': code})
+                LOG.info('CAPTCHA handler stopped (%s); manual completion remains available', code)
+            if result.artifacts:
+                try:
+                    (Path(result.artifacts) / 'captcha-events.json').write_text(json.dumps(result.captcha_events, ensure_ascii=False, indent=2), encoding='utf-8')
+                except OSError:
+                    LOG.warning('Could not save CAPTCHA events; continuing manual observation')
+            await capture()
+            # Only a changed challenge after a completed submission can start
+            # another paid stage. Transport/format failures never trigger this.
+            if not (isinstance(outcome, dict) and outcome.get('outcome') == 'challenge_changed'
+                    and getattr(handler, 'remaining_attempts', 0) > 0):
+                break
+            LOG.info('New CAPTCHA stage; remaining paid limit: %s', handler.remaining_attempts)
+            await asyncio.sleep(2)
     if seconds:
         LOG.info("Complete CAPTCHA in the browser; waiting up to %s seconds", seconds)
         try:
@@ -671,6 +679,7 @@ def main(argv=None):
     parser.add_argument("--wait-for-tasks", type=float, default=0, help="Seconds to wait for nonempty server tasks")
     parser.add_argument("--task-poll-interval", type=float, default=60)
     parser.add_argument("--captcha-key-file", type=Path, help="Explicit opt-in to at most one paid CAPTCHA per batch")
+    parser.add_argument("--captcha-max-tasks", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--captcha-kinds", choices=("text", "silhouette", "both"), default="both")
     parser.add_argument("--captcha-endpoint", default="https://api.cap.guru")
     parser.add_argument("--domain", help="Target domain; omitted for a random organic result")
@@ -766,14 +775,16 @@ def main(argv=None):
             if not batch_tasks:
                 LOG.info("No tasks in batch; waiting limit reached" if args.wait_for_tasks else "No tasks in batch")
                 return 2 if args.wait_for_tasks else 0
+            if args.fetch_tasks:
+                (args.output / 'received-tasks.json').write_text(json.dumps([asdict(task) for task in batch_tasks], ensure_ascii=False, indent=2), encoding='utf-8')
             if captcha_key:
-                from captcha_service import CaptchaService
-                solver = CaptchaService(captcha_key, endpoint=args.captcha_endpoint)
+                from captcha_service import CaptchaQuota
+                solver = CaptchaQuota(captcha_key, endpoint=args.captcha_endpoint, max_tasks=args.captcha_max_tasks)
             async with BrowserSession(headed=args.headed, mobile=args.mobile, proxy=proxy, profile=args.profile) as session:
                 for task in batch_tasks[:args.limit_tasks]:
                     for _ in range(args.repeat):
                         captcha_handler = None
-                        if solver is not None and not solver.submitted:
+                        if solver is not None and not solver.exhausted:
                             from captcha_handler import PaidSearchCaptchaHandler
                             kinds = ("text", "silhouette") if args.captcha_kinds == "both" else (args.captcha_kinds,)
                             captcha_handler = PaidSearchCaptchaHandler(solver, allowed_kinds=kinds)

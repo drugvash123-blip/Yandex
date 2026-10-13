@@ -155,3 +155,57 @@ def test_transient_poll_failures_remain_bounded():
         service.solve_image(b'image')
     assert service.task_id == '123'
     assert len(session.calls) == 3
+
+
+def test_quota_consumes_ambiguous_submission_and_bounds_whole_batch():
+    from captcha_service import CaptchaQuota
+    created = []
+    def factory(key, endpoint):
+        service, session = client([requests.Timeout('uncertain')])
+        created.append(session)
+        return service
+    quota = CaptchaQuota('test-secret', endpoint='https://solver.invalid', max_tasks=1, factory=factory)
+    with pytest.raises(CaptchaError, match='transport_error'):
+        quota.solve_image(b'image')
+    assert quota.exhausted and quota.remaining == 0
+    with pytest.raises(CaptchaError, match='submission_limit_reached'):
+        quota.solve_image(b'another')
+    assert len(created) == 1 and len(created[0].calls) == 1
+
+
+def test_explicit_quota_uses_separate_single_submission_clients():
+    from captcha_service import CaptchaQuota
+    created = []
+    def factory(key, endpoint):
+        service, session = client(['OK|' + str(len(created) + 1), 'OK|word'])
+        created.append(session)
+        return service
+    quota = CaptchaQuota('test-secret', endpoint='https://solver.invalid', max_tasks=2, factory=factory)
+    assert quota.solve_image(b'first') == 'word'
+    assert quota.solve_image(b'new challenge') == 'word'
+    assert quota.exhausted
+    assert quota.task_id == '2'
+    assert all(len(session.calls) == 2 for session in created)
+
+
+def test_quota_admission_remains_bounded_for_concurrent_callers():
+    from captcha_service import CaptchaQuota
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    created = []
+    def factory(key, endpoint):
+        time.sleep(0.03)
+        service, session = client(['OK|123', 'OK|word'])
+        created.append(session)
+        return service
+    quota = CaptchaQuota('test-secret', endpoint='https://solver.invalid', factory=factory)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(quota.solve_image, b'image') for _ in range(2)]
+        successful = 0
+        for future in futures:
+            try:
+                assert future.result() == 'word'
+                successful += 1
+            except CaptchaError as error:
+                assert str(error) == 'submission_limit_reached'
+    assert successful == 1 and len(created) == 1

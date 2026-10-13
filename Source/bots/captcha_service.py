@@ -148,3 +148,50 @@ class CaptchaService:
             if ready:
                 return answer
         raise CaptchaTimeout('poll_limit_reached')
+
+
+class CaptchaQuota:
+    """A batch-wide explicit spending limit; each image gets a single-use client."""
+    def __init__(self, key, *, endpoint, max_tasks=1, factory=None):
+        if not 1 <= max_tasks <= 3:
+            raise ValueError('max_tasks must be 1..3')
+        self.key, self.endpoint, self.max_tasks = key, endpoint, max_tasks
+        self.factory = factory or CaptchaService
+        self.clients = []
+        import threading
+        self.lock = threading.Lock()
+
+    @property
+    def remaining(self):
+        return self.max_tasks - len(self.clients)
+
+    @property
+    def exhausted(self):
+        return self.remaining == 0
+
+    @property
+    def submitted(self):
+        return any(client.submitted for client in self.clients)
+
+    @property
+    def task_id(self):
+        return self.clients[-1].task_id if self.clients else None
+
+    @property
+    def exchanges(self):
+        return [dict(exchange, attempt=i) for i, client in enumerate(self.clients, 1)
+                for exchange in client.exchanges]
+
+    def solve_image(self, image, **options):
+        with self.lock:
+            if self.exhausted:
+                raise CaptchaError('submission_limit_reached')
+            client = self.factory(self.key, endpoint=self.endpoint)
+            # Consume before transport; an ambiguous failure still spends the limit.
+            self.clients.append(client)
+        with client:
+            return client.solve_image(image, **options)
+
+    def __exit__(self, *args):
+        for client in self.clients:
+            client.__exit__(*args)

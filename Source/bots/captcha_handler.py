@@ -57,6 +57,10 @@ class PaidSearchCaptchaHandler:
         self.outcome_selector = outcome_selector
         self.outcome_frame_selector = outcome_frame_selector
 
+    @property
+    def remaining_attempts(self):
+        return getattr(self.service, 'remaining', 0)
+
     async def __call__(self, page):
         import asyncio
         import hashlib

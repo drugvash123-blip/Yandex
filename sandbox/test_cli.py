@@ -105,12 +105,14 @@ def test_paid_solver_is_opt_in_and_injected_without_requests(monkeypatch, tmp_pa
     key.write_text('local-test-key')
     service = Mock()
     service.submitted = False
+    service.exhausted = False
     service.exchanges = []
     service.task_id = None
     service.__enter__ = Mock(return_value=service)
     service.__exit__ = Mock(return_value=None)
     constructor = Mock(return_value=service)
     monkeypatch.setattr(captcha_service, 'CaptchaService', constructor)
+    monkeypatch.setattr(captcha_service, 'CaptchaQuota', constructor)
     fake = AsyncMock(return_value=runner.Result('query', 'example.com', status='found'))
     monkeypatch.setattr(runner, 'run_task', fake)
     assert runner.main(['--query', 'query', '--domain', 'example.com', '--captcha-key-file', str(key), '--output', str(tmp_path)]) == 0
@@ -126,16 +128,33 @@ def test_paid_budget_is_shared_across_batch_tasks(monkeypatch, tmp_path):
     key.write_text('local-test-key')
     service = Mock()
     service.submitted = False
+    service.exhausted = False
     service.exchanges = []
     service.task_id = None
     service.__enter__ = Mock(return_value=service)
     service.__exit__ = Mock(return_value=None)
     monkeypatch.setattr(captcha_service, 'CaptchaService', Mock(return_value=service))
+    monkeypatch.setattr(captcha_service, 'CaptchaQuota', Mock(return_value=service))
     handlers = []
     async def run(task, **kwargs):
         handlers.append(kwargs['captcha_handler'])
         service.submitted = True  # Simulate even an ambiguous submission failure.
+        service.exhausted = True
         return runner.Result(task.query, task.domain, status='found')
     monkeypatch.setattr(runner, 'run_task', AsyncMock(side_effect=run))
     assert runner.main(['--tasks-file', str(tasks), '--captcha-key-file', str(key), '--output', str(tmp_path)]) == 0
     assert handlers[0] is not None and handlers[1] is None
+
+
+def test_received_server_tasks_are_saved_before_browser_run(monkeypatch, tmp_path):
+    import task_service
+    monkeypatch.setenv('BOT_SERVICE_KEY', 'sandbox-key')
+    client = Mock()
+    client.fetch.return_value = [runner.Task('query', 'example.com')]
+    client.last_response = {'http_status': 200, 'body': ''}
+    monkeypatch.setattr(task_service, 'TaskService', Mock(return_value=client))
+    async def run(task, **kwargs):
+        assert json.loads((tmp_path / 'received-tasks.json').read_text()) == [{'query': 'query', 'domain': 'example.com'}]
+        return runner.Result(task.query, task.domain, status='found')
+    monkeypatch.setattr(runner, 'run_task', AsyncMock(side_effect=run))
+    assert runner.main(['--fetch-tasks', '--output', str(tmp_path)]) == 0

@@ -51,3 +51,24 @@ def test_task_wait_returns_real_nonempty_batch():
     service = SimpleNamespace(fetch=lambda: next(replies))
     tasks = asyncio.run(wait_for_tasks(service, 1, 0.01))
     assert tasks == [Task('query', 'example.com')]
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_new_stages_only_continue_with_explicit_remaining_budget(monkeypatch, failure):
+    import runner
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=True))
+    class Handler:
+        remaining_attempts = 3
+        calls = 0
+        async def __call__(self, page):
+            self.calls += 1
+            self.remaining_attempts -= 1
+            if failure:
+                raise CaptchaError('transport_error')
+            return {'outcome': 'challenge_changed'}
+    handler = Handler()
+    result = runner.Result('query', 'example.com')
+    assert asyncio.run(runner.wait_captcha(None, result, 0, handler, runner.CaptchaBudget())) is False
+    assert handler.calls == (1 if failure else 3)
+    assert result.status == 'captcha'  # Budget exhaustion never pretends success.
