@@ -4,6 +4,7 @@ Not connected to the browser runner: live use must be explicitly configured.
 """
 import base64
 import json
+import math
 import re
 import time
 from urllib.parse import urlsplit
@@ -69,7 +70,7 @@ class CaptchaService:
         if (not key or parsed.scheme != 'https' or not parsed.hostname or
                 parsed.username or parsed.password or parsed.query or parsed.fragment):
             raise ValueError('An API key and an explicit HTTPS endpoint are required')
-        if deadline <= 0 or result_timeout <= 0 or poll_interval < 5 or max_polls < 1:
+        if not all(math.isfinite(value) for value in (deadline, result_timeout, poll_interval)) or deadline <= 0 or result_timeout <= 0 or poll_interval < 5 or max_polls < 1:
             raise ValueError('Invalid waiting limits')
         self.key, self.endpoint = key, endpoint.rstrip('/')
         self.deadline, self.poll_interval, self.max_polls = deadline, poll_interval, max_polls

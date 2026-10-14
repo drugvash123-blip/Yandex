@@ -1,6 +1,6 @@
 """Continuous, bounded thread pool; each browser batch runs in its own process."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
 import hashlib
 import json
 import logging
@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import urlsplit
 import uuid
 
@@ -48,14 +49,17 @@ def load_proxies(path):
     return result
 
 
-def run_child(command, console, stop):
+def run_child(command, console, stop, *, timeout=None, clock=time.monotonic):
     with console.open('w', encoding='utf-8') as stream:
         process = subprocess.Popen(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT,
                                    start_new_session=os.name != 'nt')
+        started = clock()
         try:
             while process.poll() is None:
                 if stop.wait(0.25):
                     break
+                if timeout is not None and clock() - started >= timeout:
+                    raise TimeoutError('Browser batch exceeded its watchdog deadline')
             return process.poll()
         finally:
             if process.poll() is None:
@@ -91,6 +95,7 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                 identity, proxy = proxies.get(timeout=0.25)
             except queue.Empty:
                 continue
+            private_files = []
             try:
                 cycles += 1
                 stage = 'fetch_tasks'
@@ -107,11 +112,13 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                     tasks_file.write_text(json.dumps([asdict(task) for task in tasks], ensure_ascii=False, indent=2), encoding='utf-8')
                     # Private per-batch config is local and ignored, never a CLI secret.
                     proxy_file = batch / 'proxy.json'
+                    private_files.append(proxy_file)
                     descriptor = os.open(proxy_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
                         json.dump(proxy, stream)
                     # TaskService takes the already validated key; pass it through a private file.
                     key_file = batch / 'service-key.txt'
+                    private_files.append(key_file)
                     descriptor = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
                         stream.write(key)
@@ -130,7 +137,15 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                                        '--client-id', f'{client_id}-{identity}', '--proxy-config', str(proxy_file),
                                        '--profile', str(profiles / identity), '--output', str(chunk)]
                             stage = 'launch_batch'
-                            code = launch(command, chunk / 'console.log', stop)
+                            if launch is run_child:
+                                timing = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+                                timing.add_argument('--deadline', type=float, default=600)
+                                options, _ = timing.parse_known_args(extra)
+                                # Includes launch/close overhead and per-task diagnostics.
+                                watchdog = min(100, len(tasks)-offset) * (options.deadline + 90) + 180
+                                code = launch(command, chunk / 'console.log', stop, timeout=watchdog)
+                            else:
+                                code = launch(command, chunk / 'console.log', stop)
                             LOG.info('Worker %s proxy %s: batch exit %s; logs %s', number, identity, code, chunk)
                             if code != 0:
                                 break  # Failed tasks are retained, never blindly replayed or reported.
@@ -148,6 +163,11 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                     LOG.warning('Could not save worker error diagnostics')
                 LOG.warning('Worker %s cycle failed at %s: %s: %s', number, stage, diagnostic['error_type'], diagnostic['message'])
             finally:
+                for path in private_files:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        LOG.warning('Could not remove private configuration file: %s', path.name)
                 stop.wait(interval)
                 proxies.put((identity, proxy))
                 proxies.task_done()
@@ -169,6 +189,8 @@ def main(argv=None):
     extra += ['--captcha-key-file', str(args.captcha_key_file.resolve())]
     if args.workers < 1 or args.workers > 100 or not math.isfinite(args.task_poll_interval) or args.task_poll_interval < 1:
         parser.error('workers must be 1..100; task-poll-interval at least 1 second')
+    if not args.client_id.strip():
+        parser.error('client-id must not be empty')
     reserved = ('--query', '--domain', '--tasks-file', '--fetch-tasks', '--wait-for-tasks', '--limit-tasks',
                 '--upload-stats', '--proxy-config', '--no-proxy', '--profile', '--repeat', '--keep-open-on-failure', '--validate-config', '--help', '-h')
     if any(argument.split('=')[0] in reserved for argument in extra):
@@ -204,6 +226,10 @@ def main(argv=None):
             futures = [pool.submit(worker, i+1, leases, stop, key=key, output=args.output,
                                    profiles=args.profiles, client_id=args.client_id,
                                    interval=args.task_poll_interval, extra=extra) for i in range(count)]
+            finished, _ = wait(futures, return_when=FIRST_EXCEPTION)
+            if any(future.exception() is not None for future in finished):
+                LOG.error('A worker exited unexpectedly; stopping the remaining workers')
+                stop.set()
             for future in futures:
                 future.result()
     finally:

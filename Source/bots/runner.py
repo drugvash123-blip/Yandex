@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field as data_field
 from datetime import datetime, timezone
 import json
 import logging
+import math
 import hashlib
 import os
 import random
@@ -725,6 +726,9 @@ def main(argv=None):
     connection.add_argument("--proxy-config", type=Path, help="Local JSON: server, username, password")
     connection.add_argument("--no-proxy", action="store_true", help="Ignore proxy configuration and environment")
     args = parser.parse_args(argv)
+    for name in ('deadline', 'captcha_wait', 'action_pause', 'visit_seconds', 'wait_for_tasks', 'task_poll_interval'):
+        if not math.isfinite(getattr(args, name)):
+            parser.error(name.replace('_', '-') + ' must be finite')
     if not 1 <= args.repeat <= 10 or not 1 <= args.max_pages <= 10 or args.deadline <= 0:
         parser.error("repeat/max-pages must be 1..10; deadline must be positive")
     if args.captcha_wait < 0:
@@ -796,6 +800,16 @@ def main(argv=None):
         solver = None
         stage = 'fetch_tasks' if args.fetch_tasks else 'prepare_tasks'
         task_index = None
+        async def upload_results():
+            nonlocal stage
+            stage = 'submit_stats'
+            submitted = await asyncio.to_thread(service.submit, results, args.client_id)
+            stage = 'save_submission_receipt'
+            receipt = {'submitted': submitted, 'client_id': args.client_id,
+                       'response': service.last_response if submitted else None}
+            receipt_path = args.output / ('submission-' + uuid.uuid4().hex + '.json')
+            receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding='utf-8')
+            LOG.info('Statistics submission: %s', 'completed' if submitted else 'no eligible results')
         try:
             batch_tasks = await wait_for_tasks(service, args.wait_for_tasks, args.task_poll_interval) if args.fetch_tasks else tasks
             if not batch_tasks:
@@ -852,15 +866,7 @@ def main(argv=None):
                         break
                 stage = 'browser_close'
             if service and args.upload_stats:
-                stage = 'submit_stats'
-                submitted = await asyncio.to_thread(service.submit, results, args.client_id)
-                stage = 'save_submission_receipt'
-                args.output.mkdir(parents=True, exist_ok=True)
-                receipt = {"submitted": submitted, "client_id": args.client_id,
-                           "response": service.last_response if submitted else None}
-                receipt_path = args.output / ("submission-" + uuid.uuid4().hex + ".json")
-                receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
-                LOG.info("Statistics submission: %s", "completed" if submitted else "no eligible results")
+                await upload_results()
             return int(failed)
         except Exception as exc:
             error = safe_error(exc)
@@ -870,14 +876,30 @@ def main(argv=None):
             failure = {"time": datetime.now(timezone.utc).isoformat(), **diagnostic, 'task_index': task_index,
                        "completed_tasks": len(results), "profile": str(args.profile) if args.profile else None,
                        "proxy": safe_url(proxy["server"]) if proxy else None}
+            if stage == 'browser_close' and results and service and args.upload_stats:
+                # Closing Chrome must not suppress already completed work. This
+                # path precedes the first write; never retry a failed submission.
+                try:
+                    await upload_results()
+                    failure['submission_after_close_error'] = 'completed'
+                except Exception as upload_error:
+                    failure['submission_after_close_error'] = error_diagnostic(upload_error, stage=stage,
+                        secrets=[captcha_key, getattr(service, 'key', None), *(proxy or {}).values()])
             (args.output / ("batch-error-" + uuid.uuid4().hex + ".json")).write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
-            LOG.error("Batch failed at %s: %s: %s; saved results are retained", stage, diagnostic['error_type'], diagnostic['message'])
+            LOG.error("Batch failed at %s: %s: %s; saved results are retained", diagnostic['stage'], diagnostic['error_type'], diagnostic['message'])
             return 2
         finally:
             if solver is not None:
-                (args.output / 'captcha-service.json').write_text(json.dumps({
-                    'submission_attempted': solver.submitted, 'task_id': solver.task_id, 'exchanges': solver.exchanges}, indent=2), encoding='utf-8')
-                solver.__exit__(None, None, None)
+                try:
+                    (args.output / 'captcha-service.json').write_text(json.dumps({
+                        'submission_attempted': solver.submitted, 'task_id': solver.task_id, 'exchanges': solver.exchanges}, indent=2), encoding='utf-8')
+                except OSError:
+                    LOG.warning('Could not save CAPTCHA service diagnostics')
+                finally:
+                    try:
+                        solver.__exit__(None, None, None)
+                    except Exception as close_error:
+                        LOG.warning('Could not close CAPTCHA client: %s', type(close_error).__name__)
             if service:
                 service.session.close()
     return asyncio.run(batch())
