@@ -44,6 +44,11 @@ def local_site():
             elif query == "rate-limit":
                 status = 429
                 html = '<title>429</title><p>Too many requests</p>'
+            elif query == 'rate-to-captcha' and 'challenge' not in args and 'passed' not in args:
+                status=429
+                html='<title>429</title><script>setTimeout(()=>location.search+="&challenge=1",700)</script>'
+            elif query == 'rate-to-captcha' and 'passed' not in args:
+                html='<title>Вы не робот?</title><div class="CheckboxCaptcha"><button class="CheckboxCaptcha-Button" onclick="location.search+=\'&passed=1\'">Я не робот</button></div>'
             elif query == "rate-limit-recovers" and "recovered" not in args:
                 status = 429
                 html = '<title>429</title><script>setTimeout(()=>location.search+="&recovered=1",700)</script>'
@@ -247,6 +252,28 @@ def test_rate_limit_passive_recovery(local_site, tmp_path, query, status):
         assert result.http_status == 200
         assert "/target" in result.visited_url
         assert any("Страница восстановилась" in a["description"] for a in result.actions)
+    else:
+        evidence=json.loads((Path(result.artifacts)/'rate-limit-check.json').read_text())
+        assert evidence['captcha_present'] is False
+        assert evidence['detection']['candidates']==[]
+
+
+def test_captcha_during_429_recovery_is_solved_automatically(local_site,tmp_path):
+    calls=[]
+    async def solve(page):
+        calls.append(page.url)
+        await page.locator('.CheckboxCaptcha-Button').click()
+        await page.locator('.OrganicTitle-Link').first.wait_for(state='visible')
+        return {'outcome':'captcha_left'}
+    result=asyncio.run(run_task(Task('rate-to-captcha','127.0.0.1'),base_url=local_site.url,
+                    deadline=20,captcha_wait=3,output=tmp_path,typing_delay_ms=0,
+                    captcha_handler=solve,diagnostics='compact',max_pages=1))
+    assert result.status=='found',result
+    assert len(calls)==1
+    assert not list(Path(result.artifacts).glob('*.zip'))
+    assert not list(Path(result.artifacts).glob('*.png'))
+    assert not list(Path(result.artifacts).glob('*.html'))
+    assert any('CAPTCHA появилась во время' in row['description'] for row in result.actions)
 
 
 @pytest.mark.parametrize("query,status,count", [("rate-limit-twice", "rate_limited", 3), ("pagination-captcha", "captcha", 2)])

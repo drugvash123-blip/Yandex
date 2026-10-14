@@ -16,7 +16,7 @@ import unicodedata
 import uuid
 
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError, async_playwright
-from diagnostics import NetworkJournal, safe_error, safe_url, error_diagnostic
+from diagnostics import NetworkJournal, safe_error, safe_url, error_diagnostic, ARTIFACT_MODE, rotating_log
 from captcha_detection import inspect_captcha
 
 LOG = logging.getLogger(__name__)
@@ -79,7 +79,8 @@ async def captcha_present(page):
     try:
         return ("showcaptcha" in page.url or "captcha" in urlsplit(page.url).path.lower()
                 or "Вы не робот" in await page.title()
-                or await page.locator(".CheckboxCaptcha, .AdvancedCaptcha, #captcha-slider").count() > 0)
+                or await page.locator(".CheckboxCaptcha:visible, .AdvancedCaptcha:visible, #captcha-slider:visible").count() > 0
+                or bool((await inspect_captcha(page)).get('candidates')))
     except BrowserError as exc:
         # CAPTCHA redirects can replace the JS context during this check.
         if not page.is_closed() and "Execution context was destroyed" in str(exc):
@@ -178,13 +179,16 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
             signature = json.dumps({'frames': frames, 'detection': detection}, sort_keys=True)
             if signature in captured:
                 return
+            if len(captured) >= 20:
+                return
             name = f'{capture_id}-{len(captured)}'
             directory = Path(result.artifacts)
             (directory / f'{name}.json').write_text(json.dumps(frames, ensure_ascii=False, indent=2))
             (directory / f'{name}-diagnosis.json').write_text(json.dumps(detection, ensure_ascii=False, indent=2))
             await save_snapshot(page, directory, name)
-            for i, frame in enumerate(page.frames):
-                (directory / f'{name}-frame-{i}.html').write_text(await frame.content(), encoding='utf-8')
+            if ARTIFACT_MODE.get() == 'full':
+                for i, frame in enumerate(page.frames):
+                    (directory / f'{name}-frame-{i}.html').write_text(await frame.content(), encoding='utf-8')
             captured.add(signature)
             LOG.info('CAPTCHA structure saved: %s', name)
         except (BrowserError, OSError):
@@ -295,6 +299,11 @@ async def search(page, task, result, base_url, max_pages, click, captcha_wait=0,
                     end = asyncio.get_running_loop().time() + recovery_wait
                     while asyncio.get_running_loop().time() < end:
                         await asyncio.sleep(min(1, max(0, end - asyncio.get_running_loop().time())))
+                        if await captcha_present(page):
+                            action('CAPTCHA появилась во время восстановления после 429; автоматическая обработка')
+                            if not await wait_captcha(page, result, captcha_wait, captcha_handler, captcha_budget):
+                                return True
+                            end = asyncio.get_running_loop().time() + recovery_wait
                         if document["status"] is None or not 200 <= document["status"] < 300:
                             continue
                         try:
@@ -312,6 +321,18 @@ async def search(page, task, result, base_url, max_pages, click, captcha_wait=0,
                         except BrowserError:
                             if page.is_closed():
                                 raise
+                detection = await inspect_captcha(page)
+                present = await captcha_present(page)
+                evidence = {'http_status': document['status'], 'url': safe_url(page.url),
+                            'captcha_present': present, 'detection': detection}
+                result.http_status = document['status']
+                if directory:
+                    (Path(directory)/'rate-limit-check.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding='utf-8')
+                if present:
+                    if not await wait_captcha(page, result, captcha_wait, captcha_handler, captcha_budget):
+                        return True
+                    return await http_failure()
+                action(f"Проверка перед остановкой: CAPTCHA не обнаружена; state={detection['state']}; HTTP {document['status']}")
                 result.status, result.detail = "rate_limited", "Current browser request received a rate limit response"
                 return True
             if result.http_status and result.http_status >= 400:
@@ -595,7 +616,17 @@ class BrowserSession:
             self.bridge.__exit__(None, None, None)
 
 
-async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
+async def run_task(task, *, diagnostics='full', **kwargs):
+    if diagnostics not in ('compact', 'full'):
+        raise ValueError('Unknown diagnostics mode')
+    token = ARTIFACT_MODE.set(diagnostics)
+    try:
+        return await _run_task(task, **kwargs)
+    finally:
+        ARTIFACT_MODE.reset(token)
+
+
+async def _run_task(task, *, base_url="https://ya.ru/", max_pages=3,
                    deadline=60, headed=False, mobile=False, click=True,
                    channel="chrome", proxy=None, output=Path("sandbox/artifacts"), captcha_wait=0,
                    session=None, typing_delay_ms=1000, action_pause=0, visit_seconds=0, captcha_handler=None):
@@ -616,8 +647,9 @@ async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
                 result.stage = 'prepare_page'
                 context = session.context
                 journal = NetworkJournal(context, directory / "network.jsonl")
-                await context.tracing.start(screenshots=True, snapshots=True, sources=True)
-                tracing = True
+                if ARTIFACT_MODE.get() == 'full':
+                    await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+                    tracing = True
                 page = context.pages[0] if context.pages else await context.new_page()
                 (directory / "session.json").write_text(json.dumps(await session.metadata(page), ensure_ascii=False, indent=2), encoding="utf-8")
                 await search(page, task, result, base_url, max_pages, click, captcha_wait, directory, typing_delay_ms,
@@ -656,6 +688,8 @@ async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
 
 
 async def save_snapshot(page, directory, name):
+    if ARTIFACT_MODE.get() != 'full':
+        return
     try:
         (directory / f"{name}.html").write_text(await page.content(), encoding="utf-8")
         await page.screenshot(path=str(directory / f"{name}.png"), full_page=True, timeout=3000)
@@ -691,6 +725,7 @@ async def wait_for_tasks(service, wait_seconds, poll_interval):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Finite Playwright search runner", allow_abbrev=False)
     parser.add_argument('--validate-config', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--diagnostics', choices=('compact', 'full'), default='compact')
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--query")
     source.add_argument("--tasks-file", type=Path, help="JSON array of query/domain tasks")
@@ -792,7 +827,7 @@ def main(argv=None):
         return 0
     args.output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-                        handlers=[logging.StreamHandler(), logging.FileHandler(args.output / "runner.log", encoding="utf-8")])
+                        handlers=[logging.StreamHandler(), rotating_log(args.output / "runner.log")])
 
     async def batch():
         results = []
@@ -831,7 +866,7 @@ def main(argv=None):
                             kinds = ("text", "silhouette") if args.captcha_kinds == "both" else (args.captcha_kinds,)
                             captcha_handler = PaidSearchCaptchaHandler(solver, allowed_kinds=kinds)
                         stage = 'run_task'
-                        result = await run_task(task, max_pages=args.max_pages, deadline=args.deadline,
+                        result = await run_task(task, diagnostics=args.diagnostics, max_pages=args.max_pages, deadline=args.deadline,
                                                 headed=args.headed, mobile=args.mobile, click=args.click,
                                                 proxy=proxy, output=args.output, captcha_wait=args.captcha_wait, session=session,
                                                 typing_delay_ms=args.typing_delay_ms, action_pause=args.action_pause,

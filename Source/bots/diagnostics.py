@@ -2,6 +2,15 @@
 from datetime import datetime, timezone
 import json
 import re
+import logging
+from logging.handlers import RotatingFileHandler
+from contextvars import ContextVar
+
+ARTIFACT_MODE = ContextVar('artifact_mode', default='full')
+
+
+def rotating_log(path, max_bytes=5*1024*1024, backups=3):
+    return RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups, encoding='utf-8')
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -49,7 +58,8 @@ def error_diagnostic(error, *, stage, secrets=()):
 class NetworkJournal:
     def __init__(self, context, path):
         self.context = context
-        self.stream = path.open("a", encoding="utf-8")
+        self.handler = rotating_log(path, max_bytes=1024*1024, backups=2)
+        self.handler.setFormatter(logging.Formatter('%(message)s'))
         self.handlers = [("request", self.request), ("response", self.response),
                          ("requestfailed", self.failed)]
         for name, callback in self.handlers:
@@ -65,8 +75,7 @@ class NetworkJournal:
                    "resource_type": request.resource_type, "navigation": navigation, **extra}
             if request.redirected_from:
                 row["redirected_from"] = safe_url(request.redirected_from.url)
-            self.stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-            self.stream.flush()
+            self.handler.emit(logging.LogRecord('network', logging.INFO, '', 0, json.dumps(row, ensure_ascii=False), (), None))
         except (OSError, ValueError):
             pass  # Diagnostics must not terminate the browser scenario.
 
@@ -82,4 +91,4 @@ class NetworkJournal:
     def close(self):
         for name, callback in self.handlers:
             self.context.remove_listener(name, callback)
-        self.stream.close()
+        self.handler.close()

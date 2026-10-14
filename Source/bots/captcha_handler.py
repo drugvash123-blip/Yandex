@@ -197,7 +197,11 @@ class PaidSearchCaptchaHandler:
                 return await asyncio.to_thread(self.service.solve_image, image, **options)
             finally:
                 import logging
-                logging.getLogger(__name__).info('CAPTCHA API exchanges: %s', getattr(self.service, 'exchanges', []))
+                exchanges = getattr(self.service, 'exchanges', [])
+                if exchanges and 'attempt' in exchanges[-1]:
+                    attempt = exchanges[-1]['attempt']
+                    exchanges = [exchange for exchange in exchanges if exchange.get('attempt') == attempt]
+                logging.getLogger(__name__).info('CAPTCHA API exchanges for current attempt: %s', exchanges)
         spec = Challenge('text' if kind == 'text' else 'coordinates',
                          root + ' .AdvancedCaptcha-View:visible' if kind == 'text' else root,
                          root + ' .CaptchaButton_view_action:visible', '',

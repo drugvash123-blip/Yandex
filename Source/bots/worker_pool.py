@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 import uuid
 
 from task_service import TaskService
-from diagnostics import error_diagnostic
+from diagnostics import error_diagnostic, rotating_log
+from artifact_storage import prune_completed
 
 LOG = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
@@ -82,10 +83,17 @@ def run_child(command, console, stop, *, timeout=None, clock=time.monotonic):
                     else:
                         process.kill()
                     process.wait()
+            stream.flush()
+            if console.stat().st_size > 5*1024*1024:
+                with console.open('rb') as reader:
+                    reader.seek(-5*1024*1024, 2)
+                    tail=reader.read()
+                console.write_bytes(b'[Older console output trimmed]\n'+tail)
 
 
 def worker(number, proxies, stop, *, key, output, profiles, client_id,
-           interval, extra, max_cycles=0, service_factory=TaskService, launch=run_child):
+           interval, extra, max_cycles=0, service_factory=TaskService, launch=run_child,
+           artifact_max_mb=1024, artifact_max_batches=100):
     """A proxy is leased for fetching, processing, reporting and cooldown."""
     service = service_factory(key)
     cycles = 0
@@ -96,6 +104,7 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
             except queue.Empty:
                 continue
             private_files = []
+            batch = None
             try:
                 cycles += 1
                 stage = 'fetch_tasks'
@@ -168,6 +177,14 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                         path.unlink(missing_ok=True)
                     except OSError:
                         LOG.warning('Could not remove private configuration file: %s', path.name)
+                if batch is not None:
+                    try:
+                        (batch/'.complete').touch()
+                        removed = prune_completed(output, max_bytes=artifact_max_mb*1024*1024, max_batches=artifact_max_batches)
+                        if removed:
+                            LOG.info('Artifact retention: removed %s oldest completed batches', len(removed))
+                    except OSError:
+                        LOG.warning('Could not apply artifact retention')
                 stop.wait(interval)
                 proxies.put((identity, proxy))
                 proxies.task_done()
@@ -185,12 +202,16 @@ def main(argv=None):
     parser.add_argument('--client-id', default='worker')
     parser.add_argument('--output', type=Path, default=Path('sandbox/artifacts/workers'))
     parser.add_argument('--profiles', type=Path, default=Path('Data/browser-profiles/workers'))
+    parser.add_argument('--artifact-max-mb', type=int, default=1024)
+    parser.add_argument('--artifact-max-batches', type=int, default=100)
     args, extra = parser.parse_known_args(argv)
     extra += ['--captcha-key-file', str(args.captcha_key_file.resolve())]
     if args.workers < 1 or args.workers > 100 or not math.isfinite(args.task_poll_interval) or args.task_poll_interval < 1:
         parser.error('workers must be 1..100; task-poll-interval at least 1 second')
     if not args.client_id.strip():
         parser.error('client-id must not be empty')
+    if args.artifact_max_mb < 1 or args.artifact_max_batches < 1:
+        parser.error('Artifact retention limits must be positive')
     reserved = ('--query', '--domain', '--tasks-file', '--fetch-tasks', '--wait-for-tasks', '--limit-tasks',
                 '--upload-stats', '--proxy-config', '--no-proxy', '--profile', '--repeat', '--keep-open-on-failure', '--validate-config', '--help', '-h')
     if any(argument.split('=')[0] in reserved for argument in extra):
@@ -211,7 +232,14 @@ def main(argv=None):
     args.profiles = args.profiles.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
-                        handlers=[logging.StreamHandler(), logging.FileHandler(args.output / 'workers.log', encoding='utf-8')])
+                        handlers=[logging.StreamHandler(), rotating_log(args.output / 'workers.log')])
+    try:
+        removed = prune_completed(args.output, max_bytes=args.artifact_max_mb*1024*1024,
+                                  max_batches=args.artifact_max_batches)
+        if removed:
+            LOG.info('Startup artifact retention: removed %s oldest completed batches', len(removed))
+    except OSError:
+        LOG.warning('Could not apply startup artifact retention')
     leases = queue.Queue()
     for item in items:
         leases.put(item)
@@ -225,7 +253,9 @@ def main(argv=None):
         with ThreadPoolExecutor(max_workers=count) as pool:
             futures = [pool.submit(worker, i+1, leases, stop, key=key, output=args.output,
                                    profiles=args.profiles, client_id=args.client_id,
-                                   interval=args.task_poll_interval, extra=extra) for i in range(count)]
+                                   interval=args.task_poll_interval, extra=extra,
+                                   artifact_max_mb=args.artifact_max_mb,
+                                   artifact_max_batches=args.artifact_max_batches) for i in range(count)]
             finished, _ = wait(futures, return_when=FIRST_EXCEPTION)
             if any(future.exception() is not None for future in finished):
                 LOG.error('A worker exited unexpectedly; stopping the remaining workers')

@@ -13,5 +13,6 @@ Data/cache/
 Data/extensions/
 sandbox/artifacts/
 sandbox_server/artifacts/
+/Архив/
 Data/key.txt
 dist/
