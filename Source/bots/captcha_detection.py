@@ -54,4 +54,4 @@ async def inspect_captcha(page):
     if len(candidates) != 1:
         return {'state': 'ambiguous', 'candidates': candidates}
     candidate = candidates[0]
-    return {'state': 'ready' if candidate['ready'] else 'manual_required', 'candidates': candidates, 'auxiliary': auxiliary}
+    return {'state': 'ready' if candidate['ready'] else 'not_ready', 'candidates': candidates, 'auxiliary': auxiliary}

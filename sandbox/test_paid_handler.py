@@ -23,13 +23,14 @@ def test_browser_failure_with_observed_new_image_continues_stage(monkeypatch):
     assert outcome['search_verified'] is False
 
 
-def test_delayed_checkbox_is_clicked_once(monkeypatch):
+@pytest.mark.parametrize('framed', [False, True])
+def test_delayed_checkbox_is_clicked_once(monkeypatch, framed):
     import captcha_handler
     import runner
     from unittest.mock import AsyncMock
     states = iter([
         {'state': 'changing', 'candidates': []},
-        {'state': 'manual_required', 'candidates': [{'kind': 'checkbox', 'frame_index': 0}]},
+        {'state': 'not_ready', 'candidates': [{'kind': 'checkbox', 'frame_index': int(framed), 'frame_title': 'SmartCaptcha checkbox' if framed else None}]},
         {'state': 'unrecognized', 'candidates': []},
     ])
     async def inspect(page):
@@ -37,10 +38,11 @@ def test_delayed_checkbox_is_clicked_once(monkeypatch):
     monkeypatch.setattr(captcha_handler, 'inspect_captcha', inspect)
     monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=False))
     button = SimpleNamespace(count=AsyncMock(return_value=1), click=AsyncMock())
-    page = SimpleNamespace(locator=lambda selector: button)
+    scope = SimpleNamespace(locator=lambda selector: button)
+    page = SimpleNamespace(locator=lambda selector: button, frames=[None, scope])
     service = SimpleNamespace(solve_image=lambda *args, **kwargs: pytest.fail('No paid image task for checkbox'))
     outcome = asyncio.run(PaidSearchCaptchaHandler(service, action_pause=0)(page))
-    assert outcome['outcome'] == 'challenge_left'
+    assert outcome['outcome'] == 'captcha_left'
     button.click.assert_awaited_once()
 
 
@@ -152,3 +154,41 @@ def test_refresh_requires_changed_loaded_image(monkeypatch, changed):
         with pytest.raises(CaptchaError, match='refresh_not_confirmed'):
             asyncio.run(handler.refresh_challenge(page))
     button.click.assert_awaited_once()
+
+
+@pytest.mark.parametrize('mode', ['missing', 'exhausted', 'transport', 'unsupported'])
+def test_no_failure_enters_human_wait(monkeypatch, mode):
+    import runner
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=True))
+    sleep = AsyncMock()
+    monkeypatch.setattr(runner.asyncio, 'sleep', sleep)
+    class Handler:
+        remaining_attempts = 0 if mode == 'exhausted' else float('inf')
+        async def __call__(self, page):
+            raise CaptchaError('transport_error' if mode == 'transport' else 'unsupported_challenge')
+    handler = None if mode == 'missing' else Handler()
+    result = runner.Result('query', 'example.com')
+    assert asyncio.run(runner.wait_captcha(None, result, 900, handler, runner.CaptchaBudget(used=mode == 'exhausted'))) is False
+    sleep.assert_not_awaited()
+    assert result.status == 'captcha'
+    assert 'manual' not in result.detail.lower()
+
+
+def test_second_captcha_with_finite_remaining_quota_is_automatic(monkeypatch):
+    import runner
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runner, 'captcha_present', AsyncMock(side_effect=[True, False, True, False]))
+    class Handler:
+        remaining_attempts = 2
+        calls = 0
+        async def __call__(self, page):
+            self.calls += 1
+            self.remaining_attempts -= 1
+            return {'outcome': 'captcha_left'}
+    handler = Handler()
+    budget = runner.CaptchaBudget()
+    result = runner.Result('query', 'example.com')
+    assert asyncio.run(runner.wait_captcha(None, result, 900, handler, budget))
+    assert asyncio.run(runner.wait_captcha(None, result, 900, handler, budget))
+    assert handler.calls == 2

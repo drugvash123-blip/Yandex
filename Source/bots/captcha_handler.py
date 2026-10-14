@@ -112,17 +112,25 @@ class PaidSearchCaptchaHandler:
         # Images may load after the document and challenge controls appear.
         for _ in range(120):
             detection = await current()
-            if not checkbox_clicked and detection['state'] == 'manual_required' and detection['candidates'][0]['kind'] == 'checkbox':
-                button = page.locator('.CheckboxCaptcha-Button:visible')
-                if detection['candidates'][0]['frame_index'] or await button.count() != 1:
-                    raise CaptchaError('manual_checkbox_required')
+            if detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'slider':
+                raise CaptchaError('unsupported_slider_challenge')
+            if not checkbox_clicked and detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'checkbox':
+                candidate = detection['candidates'][0]
+                scope = page
+                if candidate['frame_index']:
+                    if candidate.get('frame_title') != 'SmartCaptcha checkbox':
+                        raise CaptchaError('unsupported_checkbox_frame')
+                    scope = page.frames[candidate['frame_index']]
+                button = scope.locator('.CheckboxCaptcha-Button:visible, #js-button:visible')
+                if await button.count() != 1:
+                    raise CaptchaError('ambiguous_checkbox_control')
                 await asyncio.sleep(self.action_pause)
                 await button.click()
                 checkbox_clicked = True
             if detection['state'] == 'ready':
                 break
             if detection['state'] == 'unrecognized' and not await captcha_present(page):
-                return {'outcome': 'challenge_left', 'search_verified': False}
+                return {'outcome': 'captcha_left', 'search_verified': False}
             await asyncio.sleep(0.5)
         if detection['state'] != 'ready':
             raise CaptchaError('challenge_not_ready')
@@ -164,7 +172,7 @@ class PaidSearchCaptchaHandler:
                         return  # Runner still checks HTTP and the requested query.
                     if state['state'] == 'ready' and await sources() != initial_sources:
                         observed['outcome'] = 'challenge_changed'
-                        return  # New task: budget remains spent, manual fallback.
+                        return  # Runner automatically handles the new challenge.
                 except BrowserError:
                     pass  # Navigation can replace the document mid-observation.
                 await asyncio.sleep(0.25)

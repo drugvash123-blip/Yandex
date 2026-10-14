@@ -80,7 +80,7 @@ async def captcha_present(page):
                 or "Вы не робот" in await page.title()
                 or await page.locator(".CheckboxCaptcha, .AdvancedCaptcha, #captcha-slider").count() > 0)
     except BrowserError as exc:
-        # A redirect after manual completion can replace the JS context during this check.
+        # CAPTCHA redirects can replace the JS context during this check.
         if not page.is_closed() and "Execution context was destroyed" in str(exc):
             return True  # Retry during the bounded wait instead of aborting the task.
         raise
@@ -189,7 +189,7 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
         except (BrowserError, OSError):
             LOG.info('CAPTCHA changed during capture; continuing observation')
     await capture()
-    if handler is not None and budget is not None and (not budget.used or getattr(handler, 'remaining_attempts', 0) == float('inf')):
+    if handler is not None and budget is not None and (not budget.used or getattr(handler, 'remaining_attempts', 0) > 0):
         # Consume before calling: a transport failure may already create a paid task.
         budget.used = True
         unsolvable_retries = 0
@@ -206,7 +206,10 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 from captcha_service import CaptchaError
                 code = str(error) if isinstance(error, CaptchaError) else safe_error(error)
                 result.captcha_events.append({'event': 'handler_failed', 'code': code})
-                LOG.info('CAPTCHA handler stopped (%s); manual completion remains available', code)
+                LOG.info('Automatic CAPTCHA handler failed (%s)', code)
+                result.detail = f'Automatic CAPTCHA failed: {code}'
+                if code == 'challenge_changed' and getattr(handler, 'remaining_attempts', 0) > 0:
+                    outcome = {'outcome': 'challenge_changed'}
                 if code == 'ERROR_CAPTCHA_UNSOLVABLE' and unsolvable_retries < 1 and getattr(handler, 'remaining_attempts', 0) > 0:
                     unsolvable_retries += 1
                     try:
@@ -222,7 +225,7 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 try:
                     (Path(result.artifacts) / 'captcha-events.json').write_text(json.dumps(result.captcha_events, ensure_ascii=False, indent=2), encoding='utf-8')
                 except OSError:
-                    LOG.warning('Could not save CAPTCHA events; continuing manual observation')
+                    LOG.warning('Could not save CAPTCHA events')
             await capture()
             if retry_refreshed:
                 continue
@@ -234,20 +237,14 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
             LOG.info('New CAPTCHA stage; remaining paid limit: %s', handler.remaining_attempts)
             unsolvable_retries = 0
             await asyncio.sleep(2)
-    if seconds and await captcha_present(page):
-        LOG.info("Complete CAPTCHA in the browser; waiting up to %s seconds", seconds)
-        try:
-            async with asyncio.timeout(seconds):
-                while await captcha_present(page):
-                    await capture()
-                    await asyncio.sleep(0.5)
-        except TimeoutError:
-            pass
     if await captcha_present(page):
-        result.status, result.detail = "captcha", "Browser requires CAPTCHA completion"
+        result.status = 'captcha'
+        result.detail = result.detail or ('Automatic CAPTCHA handler unavailable' if handler is None else 'Automatic CAPTCHA did not complete; solver quota exhausted or challenge unsupported')
+        LOG.error('%s; stopping task without human waiting', result.detail)
         return False
     if result.artifacts:
         await save_snapshot(page, Path(result.artifacts), capture_id + '-after')
+    result.detail = None
     return True
 
 
@@ -702,7 +699,7 @@ def main(argv=None):
     parser.add_argument("--wait-for-tasks", type=float, default=0, help="Seconds to wait for nonempty server tasks")
     parser.add_argument("--task-poll-interval", type=float, default=60)
     parser.add_argument("--captcha-key-file", type=Path, help="Explicit opt-in to paid CAPTCHA solving")
-    parser.add_argument("--captcha-max-tasks", type=int, default=1, help="Batch task limit; 0 means unlimited")
+    parser.add_argument("--captcha-max-tasks", type=int, default=0, help="Batch task limit; 0 means unlimited (default)")
     parser.add_argument("--captcha-kinds", choices=("text", "silhouette", "both"), default="both")
     parser.add_argument("--captcha-endpoint", default="https://api.cap.guru")
     parser.add_argument("--domain", help="Target domain; omitted for a random organic result")
@@ -720,7 +717,7 @@ def main(argv=None):
     visit.add_argument("--click", action="store_true", dest="click")
     visit.add_argument("--no-click", action="store_false", dest="click")
     parser.set_defaults(click=True)
-    parser.add_argument("--captcha-wait", type=float, default=0, help="Seconds for manual CAPTCHA completion (requires --headed)")
+    parser.add_argument("--captcha-wait", type=float, default=0, help="Passive HTTP 429 recovery window; never waits for human CAPTCHA solving")
     parser.add_argument("--typing-delay-ms", type=int, default=1000, help="Delay between keystrokes; original behaviour: 1000 ms")
     parser.add_argument("--action-pause", type=float, default=15, help="Pause before query submission and pagination actions")
     parser.add_argument("--visit-seconds", type=float, default=100, help="Time on destination site, matching the original worker")
@@ -732,8 +729,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 10 or not 1 <= args.max_pages <= 10 or args.deadline <= 0:
         parser.error("repeat/max-pages must be 1..10; deadline must be positive")
-    if args.captcha_wait < 0 or (args.captcha_wait and not args.headed):
-        parser.error("captcha-wait must be nonnegative and requires --headed")
+    if args.captcha_wait < 0:
+        parser.error("captcha-wait must be nonnegative")
     if args.keep_open_on_failure and not args.headed:
         parser.error("keep-open-on-failure requires headed")
     if args.domain and not args.query:
@@ -831,7 +828,7 @@ def main(argv=None):
                         print(json.dumps(asdict(result), ensure_ascii=False), flush=True)
                         completed = completed_search(result, args.max_pages)
                         failed |= not completed
-                        if args.keep_open_on_failure and not completed:
+                        if args.keep_open_on_failure and not args.captcha_key_file and not completed and result.status not in ('captcha', 'rate_limited'):
                             closed = asyncio.Event()
                             session.browser.on("disconnected", lambda *unused: closed.set())
                             inspection = NetworkJournal(session.context, Path(result.artifacts) / "inspection-network.jsonl")
@@ -851,7 +848,7 @@ def main(argv=None):
                                 inspection.close()
                             break
                         if result.status in ("rate_limited", "captcha"):
-                            LOG.warning("Stopping batch: search requires manual intervention")
+                            LOG.warning("Stopping batch: automatic search could not complete")
                             break
                     if results[-1].status in ("rate_limited", "captcha") or (args.keep_open_on_failure and not completed_search(results[-1], args.max_pages)):
                         break

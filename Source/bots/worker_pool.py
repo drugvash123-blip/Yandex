@@ -160,11 +160,13 @@ def main(argv=None):
     parser.add_argument('--workers', type=int, required=True)
     parser.add_argument('--proxies-file', type=Path, required=True)
     parser.add_argument('--service-key-file', type=Path, required=True)
+    parser.add_argument('--captcha-key-file', type=Path, required=True)
     parser.add_argument('--task-poll-interval', type=float, default=1)
     parser.add_argument('--client-id', default='worker')
     parser.add_argument('--output', type=Path, default=Path('sandbox/artifacts/workers'))
     parser.add_argument('--profiles', type=Path, default=Path('Data/browser-profiles/workers'))
     args, extra = parser.parse_known_args(argv)
+    extra += ['--captcha-key-file', str(args.captcha_key_file.resolve())]
     if args.workers < 1 or args.workers > 100 or not math.isfinite(args.task_poll_interval) or args.task_poll_interval < 1:
         parser.error('workers must be 1..100; task-poll-interval at least 1 second')
     reserved = ('--query', '--domain', '--tasks-file', '--fetch-tasks', '--wait-for-tasks', '--limit-tasks',

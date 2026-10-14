@@ -132,6 +132,6 @@ def test_invalid_browser_flags_fail_before_fetch(tmp_path, monkeypatch):
     key = tmp_path/'key'; key.write_text('key')
     factory = Mock(); monkeypatch.setattr(worker_pool, 'TaskService', factory)
     with pytest.raises(SystemExit) as error:
-        worker_pool.main(['--workers','2','--proxies-file',str(path),'--service-key-file',str(key),'--max-pages','0'])
+        worker_pool.main(['--workers','2','--proxies-file',str(path),'--service-key-file',str(key),'--captcha-key-file',str(key),'--max-pages','0'])
     assert error.value.code == 2
     factory.assert_not_called()

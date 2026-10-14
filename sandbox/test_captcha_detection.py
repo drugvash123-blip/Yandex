@@ -21,12 +21,12 @@ def test_observed_layout_classification():
                 text = '<div class="AdvancedCaptcha">' + view + controls + '</div>'
                 cases = [
                     (text, 'ready', 'text'),
-                    (text.replace(image, '<img>'), 'manual_required', 'text'),
-                    (text.replace('<input value="secret-answer">', '<input disabled>'), 'manual_required', 'text'),
+                    (text.replace(image, '<img>'), 'not_ready', 'text'),
+                    (text.replace('<input value="secret-answer">', '<input disabled>'), 'not_ready', 'text'),
                     ('<div class="AdvancedCaptcha AdvancedCaptcha_silhouette">' + view + '<div class="AdvancedCaptcha-SilhouetteTask">' + image + '</div><button class="CaptchaButton_view_action">Check</button></div>', 'ready', 'silhouette'),
-                    ('<div class="CheckboxCaptcha"><button>Checkbox</button></div>', 'manual_required', 'checkbox'),
-                    ('<div id="captcha-slider">Slider</div>', 'manual_required', 'slider'),
-                    ('<div class="AdvancedCaptcha">Unfamiliar layout</div>', 'manual_required', 'unknown'),
+                    ('<div class="CheckboxCaptcha"><button>Checkbox</button></div>', 'not_ready', 'checkbox'),
+                    ('<div id="captcha-slider">Slider</div>', 'not_ready', 'slider'),
+                    ('<div class="AdvancedCaptcha">Unfamiliar layout</div>', 'not_ready', 'unknown'),
                     (text + text, 'ambiguous', None),
                     ('<div hidden class="CheckboxCaptcha">Hidden</div>' + text, 'ready', 'text'),
                     ('<title>Search</title><p>Results</p>', 'unrecognized', None),

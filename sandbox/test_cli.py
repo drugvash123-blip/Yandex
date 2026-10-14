@@ -37,6 +37,14 @@ def test_batch_stops_on_unresolved_captcha(tmp_path, monkeypatch):
     assert fake.await_count == 1
 
 
+@pytest.mark.parametrize('status', ['captcha', 'timeout'])
+def test_captcha_does_not_open_inspection_window_even_with_keep_open(monkeypatch, tmp_path, status):
+    monkeypatch.setattr(runner, 'run_task', AsyncMock(return_value=runner.Result('query', None, status=status)))
+    key = tmp_path/'key'; key.write_text('test-key')
+    assert runner.main(['--query','query','--headed','--keep-open-on-failure','--captcha-key-file',str(key),'--output',str(tmp_path)]) == 1
+    runner.BrowserSession.return_value.__aenter__.return_value.browser.on.assert_not_called()
+
+
 def test_captcha_redirect_does_not_abort_task():
     import asyncio
     page = Mock()

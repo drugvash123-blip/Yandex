@@ -211,7 +211,7 @@ def test_deadline(tmp_path):
     assert result.status == "timeout"
 
 
-@pytest.mark.parametrize("query,wait,status", [("captcha", 0.1, "captcha"), ("captcha-cleared", 3, "found")])
+@pytest.mark.parametrize("query,wait,status", [("captcha", 0.1, "captcha"), ("captcha-cleared", 3, "captcha")])
 def test_captcha_wait(local_site, tmp_path, query, wait, status):
     result = asyncio.run(run_task(Task(query, "127.0.0.1"), base_url=local_site.url,
                                  deadline=20, captcha_wait=wait, output=tmp_path, typing_delay_ms=0))
@@ -219,16 +219,19 @@ def test_captcha_wait(local_site, tmp_path, query, wait, status):
 
 
 def test_capture_records_loaded_image(local_site, tmp_path):
+    async def automatic_observer(page):
+        await page.wait_for_function("Array.from(document.querySelectorAll('.AdvancedCaptcha img')).some(img => img.complete && img.naturalWidth === 30)", timeout=5000)
     result = asyncio.run(run_task(Task("captcha-with-image", "example.com"), base_url=local_site.url,
-                                 captcha_wait=3, deadline=20, output=tmp_path, typing_delay_ms=0))
+                                 captcha_wait=3, deadline=20, output=tmp_path, typing_delay_ms=0,
+                                 captcha_handler=automatic_observer))
     assert result.status == "captcha"
-    states = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*.json') if not p.name.endswith('-diagnosis.json')]
+    states = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*-*.json') if not p.name.endswith('-diagnosis.json')]
     images = [image for state in states for frame in state for image in frame['images']]
     assert any(image['loaded'] and image['width'] == 30 for image in images)
     assert all('source' not in image and 'source_digest' in image for image in images)
     diagnoses = [json.loads(p.read_text()) for p in Path(result.artifacts).glob('captcha-*-diagnosis.json')]
     assert diagnoses
-    assert all(state['state'] == 'manual_required' for state in diagnoses)
+    assert all(state['state'] == 'not_ready' for state in diagnoses)
     assert any(candidate['image_ready'] for state in diagnoses for candidate in state['candidates'])
 
 
