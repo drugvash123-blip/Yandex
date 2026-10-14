@@ -15,7 +15,7 @@ import unicodedata
 import uuid
 
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError, async_playwright
-from diagnostics import NetworkJournal, safe_error, safe_url
+from diagnostics import NetworkJournal, safe_error, safe_url, error_diagnostic
 from captcha_detection import inspect_captcha
 
 LOG = logging.getLogger(__name__)
@@ -614,8 +614,10 @@ async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
         try:
             async with asyncio.timeout(deadline):
                 if session is None:
+                    result.stage = 'browser_start'
                     session = await stack.enter_async_context(BrowserSession(headed=headed, mobile=mobile,
                                                                             channel=channel, proxy=proxy))
+                result.stage = 'prepare_page'
                 context = session.context
                 journal = NetworkJournal(context, directory / "network.jsonl")
                 await context.tracing.start(screenshots=True, snapshots=True, sources=True)
@@ -628,6 +630,10 @@ async def run_task(task, *, base_url="https://ya.ru/", max_pages=3,
             result.status, result.detail = "timeout", "Task deadline exceeded"
         except Exception as exc:
             result.status, result.detail = "error", safe_error(exc)
+            diagnostic = error_diagnostic(exc, stage=result.stage,
+                                          secrets=[*(proxy or {}).values(), getattr(getattr(captcha_handler, 'service', None), 'key', None)])
+            (directory / 'task-error.json').write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding='utf-8')
+            LOG.error('Task failed at %s: %s', result.stage, diagnostic['message'])
         finally:
             if context:
                 try:
@@ -793,24 +799,29 @@ def main(argv=None):
         results = []
         failed = False
         solver = None
+        stage = 'fetch_tasks' if args.fetch_tasks else 'prepare_tasks'
+        task_index = None
         try:
             batch_tasks = await wait_for_tasks(service, args.wait_for_tasks, args.task_poll_interval) if args.fetch_tasks else tasks
             if not batch_tasks:
                 LOG.info("No tasks in batch; waiting limit reached" if args.wait_for_tasks else "No tasks in batch")
                 return 2 if args.wait_for_tasks else 0
             if args.fetch_tasks:
+                stage = 'save_tasks'
                 (args.output / 'received-tasks.json').write_text(json.dumps([asdict(task) for task in batch_tasks], ensure_ascii=False, indent=2), encoding='utf-8')
             if captcha_key:
                 from captcha_service import CaptchaQuota
                 solver = CaptchaQuota(captcha_key, endpoint=args.captcha_endpoint, max_tasks=args.captcha_max_tasks)
+            stage = 'browser_start'
             async with BrowserSession(headed=args.headed, mobile=args.mobile, proxy=proxy, profile=args.profile) as session:
-                for task in batch_tasks[:args.limit_tasks]:
+                for task_index, task in enumerate(batch_tasks[:args.limit_tasks], 1):
                     for _ in range(args.repeat):
                         captcha_handler = None
                         if solver is not None and not solver.exhausted:
                             from captcha_handler import PaidSearchCaptchaHandler
                             kinds = ("text", "silhouette") if args.captcha_kinds == "both" else (args.captcha_kinds,)
                             captcha_handler = PaidSearchCaptchaHandler(solver, allowed_kinds=kinds)
+                        stage = 'run_task'
                         result = await run_task(task, max_pages=args.max_pages, deadline=args.deadline,
                                                 headed=args.headed, mobile=args.mobile, click=args.click,
                                                 proxy=proxy, output=args.output, captcha_wait=args.captcha_wait, session=session,
@@ -844,8 +855,11 @@ def main(argv=None):
                             break
                     if results[-1].status in ("rate_limited", "captcha") or (args.keep_open_on_failure and not completed_search(results[-1], args.max_pages)):
                         break
+                stage = 'browser_close'
             if service and args.upload_stats:
+                stage = 'submit_stats'
                 submitted = await asyncio.to_thread(service.submit, results, args.client_id)
+                stage = 'save_submission_receipt'
                 args.output.mkdir(parents=True, exist_ok=True)
                 receipt = {"submitted": submitted, "client_id": args.client_id,
                            "response": service.last_response if submitted else None}
@@ -855,12 +869,14 @@ def main(argv=None):
             return int(failed)
         except Exception as exc:
             error = safe_error(exc)
+            diagnostic = error_diagnostic(exc, stage=stage,
+                                          secrets=[captcha_key, getattr(service, 'key', None), *(proxy or {}).values()])
             args.output.mkdir(parents=True, exist_ok=True)
-            failure = {"time": datetime.now(timezone.utc).isoformat(), "error": error,
+            failure = {"time": datetime.now(timezone.utc).isoformat(), **diagnostic, 'task_index': task_index,
                        "completed_tasks": len(results), "profile": str(args.profile) if args.profile else None,
                        "proxy": safe_url(proxy["server"]) if proxy else None}
             (args.output / ("batch-error-" + uuid.uuid4().hex + ".json")).write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
-            LOG.error("Batch failed: %s; saved results are retained", error)
+            LOG.error("Batch failed at %s: %s: %s; saved results are retained", stage, diagnostic['error_type'], diagnostic['message'])
             return 2
         finally:
             if solver is not None:

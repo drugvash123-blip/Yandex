@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from task_service import TaskService
+from diagnostics import error_diagnostic
 
 LOG = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,11 +93,13 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                 continue
             try:
                 cycles += 1
+                stage = 'fetch_tasks'
                 tasks = service.fetch()
                 response = service.last_response or {}
                 LOG.info('Worker %s proxy %s: received %s; HTTP %s; body length %s',
                          number, identity, len(tasks), response.get('http_status'), len(response.get('body', '')))
                 if tasks:
+                    stage = 'save_tasks'
                     batch = output / f'worker-{number}' / uuid.uuid4().hex
                     batch.mkdir(parents=True)
                     tasks_file = batch / 'received-tasks.json'
@@ -126,6 +129,7 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                                        '--service-key-file', str(key_file), '--upload-stats',
                                        '--client-id', f'{client_id}-{identity}', '--proxy-config', str(proxy_file),
                                        '--profile', str(profiles / identity), '--output', str(chunk)]
+                            stage = 'launch_batch'
                             code = launch(command, chunk / 'console.log', stop)
                             LOG.info('Worker %s proxy %s: batch exit %s; logs %s', number, identity, code, chunk)
                             if code != 0:
@@ -134,7 +138,15 @@ def worker(number, proxies, stop, *, key, output, profiles, client_id,
                         proxy_file.unlink(missing_ok=True)
                         key_file.unlink(missing_ok=True)
             except Exception as error:
-                LOG.warning('Worker %s cycle failed: %s', number, type(error).__name__)
+                diagnostic = error_diagnostic(error, stage=stage, secrets=[key, *proxy.values()])
+                diagnostic.update(worker=number, proxy_id=identity)
+                error_folder = output / f'worker-{number}'
+                try:
+                    error_folder.mkdir(parents=True, exist_ok=True)
+                    (error_folder / f'worker-error-{uuid.uuid4().hex}.json').write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding='utf-8')
+                except OSError:
+                    LOG.warning('Could not save worker error diagnostics')
+                LOG.warning('Worker %s cycle failed at %s: %s: %s', number, stage, diagnostic['error_type'], diagnostic['message'])
             finally:
                 stop.wait(interval)
                 proxies.put((identity, proxy))

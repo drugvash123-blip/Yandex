@@ -84,6 +84,33 @@ def test_browser_startup_failure_is_saved_without_credentials(tmp_path):
     assert record["error"] == "net::ERR_TIMED_OUT"
     assert record["completed_tasks"] == 0
     assert "secret" not in json.dumps(record)
+    assert record['stage'] == 'browser_start'
+    assert record['error_type'] == 'Error'
+    assert 'net::ERR_TIMED_OUT' in record['message']
+
+
+def test_submit_failure_reports_stage_and_keeps_completed_results(monkeypatch, tmp_path):
+    import task_service
+    monkeypatch.setenv('BOT_SERVICE_KEY', 'private-key')
+    client = Mock()
+    client.key = 'private-key'
+    client.submit.side_effect = RuntimeError('Backend refused private-key')
+    monkeypatch.setattr(task_service, 'TaskService', Mock(return_value=client))
+    monkeypatch.setattr(runner, 'run_task', AsyncMock(return_value=runner.Result('query', 'example.com', status='found')))
+    assert runner.main(['--query','query','--domain','example.com','--upload-stats','--client-id','test','--output',str(tmp_path)]) == 2
+    failure = json.loads(next(tmp_path.glob('batch-error-*.json')).read_text())
+    assert failure['stage'] == 'submit_stats' and failure['completed_tasks'] == 1
+    assert failure['message'] == 'Backend refused <redacted>'
+
+
+def test_task_startup_error_has_separate_readable_diagnostic(tmp_path):
+    import asyncio
+    runner.BrowserSession.return_value.__aenter__.side_effect = BrowserError('Chrome executable does not exist at /missing/chrome')
+    result = asyncio.run(runner.run_task(runner.Task('query'), output=tmp_path))
+    failure = json.loads((Path(result.artifacts)/'task-error.json').read_text())
+    assert result.status == 'error'
+    assert failure['stage'] == 'browser_start'
+    assert 'executable does not exist' in failure['message']
 
 
 def test_wait_for_empty_server_expires_without_browser_or_submission(monkeypatch, tmp_path):

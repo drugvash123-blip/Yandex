@@ -25,6 +25,27 @@ def safe_error(error):
     return ", ".join(dict.fromkeys(codes)) or type(error).__name__
 
 
+def error_diagnostic(error, *, stage, secrets=()):
+    """Readable exception without raw traceback source, locals or URL secrets."""
+    message = str(error)
+    for secret in sorted((str(s) for s in secrets if s), key=len, reverse=True):
+        message = message.replace(secret, '<redacted>')
+    message = re.sub(r'https?://[^\s<>\"\']+|socks5h?://[^\s<>\"\']+',
+                     lambda match: safe_url(match.group()), message)
+    message = re.sub(r'(?im)\b(cookie|set-cookie|authorization)\s*:[^\n]+', r'\1: <redacted>', message)
+    message = re.sub(r'''(?i)(["']?(?:password|passwd|botsKey|api_key|token|key)["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)''',
+                     r'\1<redacted>', message)
+    frames = []
+    trace = error.__traceback__
+    while trace is not None:
+        from pathlib import Path
+        frames.append({'file': Path(trace.tb_frame.f_code.co_filename).name,
+                       'function': trace.tb_frame.f_code.co_name, 'line': trace.tb_lineno})
+        trace = trace.tb_next
+    return {'stage': stage, 'error_type': type(error).__name__, 'error': safe_error(error),
+            'message': message[:4096], 'traceback': frames[-12:]}
+
+
 class NetworkJournal:
     def __init__(self, context, path):
         self.context = context
