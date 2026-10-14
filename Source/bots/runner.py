@@ -198,7 +198,7 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
             retry_refreshed = False
             try:
                 outcome = await handler(page)
-                if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed'):
+                if isinstance(outcome, dict) and outcome.get('outcome') in ('explicit_confirmation', 'captcha_left', 'challenge_changed', 'checkbox_returned'):
                     result.captcha_events.append({'event': 'handler_outcome', 'outcome': outcome['outcome']})
                 result.captcha_events.append({'event': 'handler_returned', 'verified': False})
             except Exception as error:
@@ -230,7 +230,7 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 continue
             # Only a changed challenge after a completed submission can start
             # another paid stage. Transport/format failures never trigger this.
-            if not (isinstance(outcome, dict) and outcome.get('outcome') == 'challenge_changed'
+            if not (isinstance(outcome, dict) and outcome.get('outcome') in ('challenge_changed', 'checkbox_returned')
                     and getattr(handler, 'remaining_attempts', 0) > 0):
                 break
             LOG.info('New CAPTCHA stage; remaining paid limit: %s', handler.remaining_attempts)

@@ -123,6 +123,8 @@ class PaidSearchCaptchaHandler:
                 logging.getLogger(__name__).info('Waiting for CAPTCHA image and controls; state=%s (bounded by task deadline)', detection['state'])
             if detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'slider':
                 raise CaptchaError('unsupported_slider_challenge')
+            if any(candidate['kind'] in ('text', 'silhouette') for candidate in detection.get('candidates', [])):
+                checkbox_clicked = False  # An advanced challenge separates two checkbox stages.
             if not checkbox_clicked and detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'checkbox':
                 candidate = detection['candidates'][0]
                 scope = page
@@ -134,7 +136,10 @@ class PaidSearchCaptchaHandler:
                 if await button.count() != 1:
                     raise CaptchaError('ambiguous_checkbox_control')
                 await asyncio.sleep(self.action_pause)
+                import logging
+                logging.getLogger(__name__).info('CAPTCHA checkbox: clicking (frame=%s)', candidate['frame_index'])
                 await button.click()
+                logging.getLogger(__name__).info('CAPTCHA checkbox: click completed; waiting for challenge')
                 checkbox_clicked = True
             if detection['state'] == 'ready':
                 break
@@ -174,6 +179,9 @@ class PaidSearchCaptchaHandler:
                         observed['outcome'] = 'explicit_confirmation'
                         return
                     state = await current()
+                    if state['state'] == 'not_ready' and len(state.get('candidates', [])) == 1 and state['candidates'][0]['kind'] == 'checkbox':
+                        observed['outcome'] = 'checkbox_returned'
+                        return
                     if state['state'] == 'unrecognized' and not await captcha_present(page):
                         observed['outcome'] = 'captcha_left'
                         return  # Runner still checks HTTP and the requested query.
@@ -207,6 +215,8 @@ class PaidSearchCaptchaHandler:
             for _ in range(40):
                 try:
                     state = await current()
+                    if state['state'] == 'not_ready' and len(state.get('candidates', [])) == 1 and state['candidates'][0]['kind'] == 'checkbox':
+                        return {'outcome': 'checkbox_returned', 'outcome_observed': True, 'search_verified': False}
                     if state['state'] == 'ready' and await sources() != initial_sources:
                         return {'outcome': 'challenge_changed', 'outcome_observed': True, 'search_verified': False}
                     if state['state'] == 'unrecognized' and not await captcha_present(page):
