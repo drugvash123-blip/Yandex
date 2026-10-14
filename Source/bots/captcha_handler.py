@@ -67,8 +67,12 @@ class PaidSearchCaptchaHandler:
         import hashlib
         from playwright.async_api import Error as BrowserError
         detection = await inspect_captcha(page)
-        if detection['state'] != 'ready':
-            raise CaptchaError('refresh_challenge_not_ready')
+        while detection['state'] != 'ready':
+            candidates = detection.get('candidates', [])
+            if detection['state'] not in ('changing', 'not_ready') or (candidates and candidates[0]['kind'] not in ('text', 'silhouette')):
+                raise CaptchaError('refresh_challenge_not_ready')
+            await asyncio.sleep(0.5)
+            detection = await inspect_captcha(page)
         candidate = detection['candidates'][0]
         scope = page
         if candidate['frame_index']:
@@ -110,8 +114,13 @@ class PaidSearchCaptchaHandler:
 
         checkbox_clicked = False
         # Images may load after the document and challenge controls appear.
-        for _ in range(120):
+        readiness_checks = 0
+        while True:
             detection = await current()
+            readiness_checks += 1
+            if readiness_checks % 30 == 0:
+                import logging
+                logging.getLogger(__name__).info('Waiting for CAPTCHA image and controls; state=%s (bounded by task deadline)', detection['state'])
             if detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'slider':
                 raise CaptchaError('unsupported_slider_challenge')
             if not checkbox_clicked and detection['state'] == 'not_ready' and detection['candidates'][0]['kind'] == 'checkbox':
@@ -132,8 +141,6 @@ class PaidSearchCaptchaHandler:
             if detection['state'] == 'unrecognized' and not await captcha_present(page):
                 return {'outcome': 'captcha_left', 'search_verified': False}
             await asyncio.sleep(0.5)
-        if detection['state'] != 'ready':
-            raise CaptchaError('challenge_not_ready')
         candidate = detection['candidates'][0]
         kind = candidate['kind']
         if kind not in ('text', 'silhouette') or kind not in self.allowed_kinds:

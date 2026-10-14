@@ -192,7 +192,6 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
     if handler is not None and budget is not None and (not budget.used or getattr(handler, 'remaining_attempts', 0) > 0):
         # Consume before calling: a transport failure may already create a paid task.
         budget.used = True
-        unsolvable_retries = 0
         while True:
             result.captcha_events.append({'event': 'handler_attempt', 'stage': result.stage})
             outcome = None
@@ -210,16 +209,16 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                 result.detail = f'Automatic CAPTCHA failed: {code}'
                 if code == 'challenge_changed' and getattr(handler, 'remaining_attempts', 0) > 0:
                     outcome = {'outcome': 'challenge_changed'}
-                if code == 'ERROR_CAPTCHA_UNSOLVABLE' and unsolvable_retries < 1 and getattr(handler, 'remaining_attempts', 0) > 0:
-                    unsolvable_retries += 1
+                if code in ('ERROR_CAPTCHA_UNSOLVABLE', 'answer_timeout', 'poll_limit_reached') and getattr(handler, 'remaining_attempts', 0) > 0:
                     try:
                         await handler.refresh_challenge(page)
                         result.captcha_events.append({'event': 'challenge_refreshed'})
-                        LOG.info('CAPTCHA refreshed and new loaded image confirmed; retrying recognition once')
+                        LOG.info('CAPTCHA refreshed and new loaded image confirmed; starting recognition of the new challenge')
                         retry_refreshed = True
                     except Exception as refresh_error:
                         refresh_code = str(refresh_error) if isinstance(refresh_error, CaptchaError) else safe_error(refresh_error)
                         result.captcha_events.append({'event': 'refresh_failed', 'code': refresh_code})
+                        result.detail = f'Automatic CAPTCHA refresh failed: {refresh_code}'
                         LOG.info('CAPTCHA refresh stopped (%s); no paid retry', refresh_code)
             if result.artifacts:
                 try:
@@ -235,7 +234,6 @@ async def wait_captcha(page, result, seconds, handler=None, budget=None):
                     and getattr(handler, 'remaining_attempts', 0) > 0):
                 break
             LOG.info('New CAPTCHA stage; remaining paid limit: %s', handler.remaining_attempts)
-            unsolvable_retries = 0
             await asyncio.sleep(2)
     if await captcha_present(page):
         result.status = 'captcha'

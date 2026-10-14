@@ -79,6 +79,31 @@ def test_deadline():
     assert len(session.calls) == 2
 
 
+def test_pending_answer_times_out_sixty_seconds_after_acceptance():
+    now = [0]
+    session = FakeSession(['OK|123'] + ['CAPCHA_NOT_READY']*10)
+    original = session.post
+    def post(url, **kwargs):
+        if url.endswith('/in.php'):
+            now[0] += 20
+        return original(url, **kwargs)
+    session.post = post
+    service = CaptchaService('test-secret', endpoint='https://solver.invalid', session=session,
+                             clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0]+seconds))
+    with pytest.raises(CaptchaTimeout, match='answer_timeout'):
+        service.solve_image(b'image')
+    assert now[0] == 80  # 20 seconds to accept, then 60 seconds to solve.
+    assert service.task_id == '123'
+    assert sum(url.endswith('/in.php') for url, _ in session.calls) == 1
+    assert all(call['json']['id'] == '123' for url, call in session.calls if url.endswith('/res.php'))
+
+
+def test_ready_answer_is_returned_without_waiting_sixty_seconds():
+    service, session = client(['OK|123', 'OK|answer'])
+    assert service.solve_image(b'image') == 'answer'
+    assert service.clock() == 10
+
+
 def test_ambiguous_failure_does_not_resubmit_or_leak_key():
     service, session = client([requests.Timeout('request included test-secret')])
     with pytest.raises(CaptchaError, match='transport_error') as error:

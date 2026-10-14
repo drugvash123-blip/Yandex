@@ -63,16 +63,17 @@ def parse_coordinates(answer, width, height):
 
 
 class CaptchaService:
-    def __init__(self, key, *, endpoint, deadline=120, poll_interval=10,
+    def __init__(self, key, *, endpoint, deadline=120, result_timeout=60, poll_interval=10,
                  max_polls=12, session=None, clock=time.monotonic, sleep=time.sleep):
         parsed = urlsplit(endpoint)
         if (not key or parsed.scheme != 'https' or not parsed.hostname or
                 parsed.username or parsed.password or parsed.query or parsed.fragment):
             raise ValueError('An API key and an explicit HTTPS endpoint are required')
-        if deadline <= 0 or poll_interval < 5 or max_polls < 1:
+        if deadline <= 0 or result_timeout <= 0 or poll_interval < 5 or max_polls < 1:
             raise ValueError('Invalid waiting limits')
         self.key, self.endpoint = key, endpoint.rstrip('/')
         self.deadline, self.poll_interval, self.max_polls = deadline, poll_interval, max_polls
+        self.result_timeout = result_timeout
         self.clock, self.sleep = clock, sleep
         self.session = session if session is not None else requests.Session()
         self.owns_session = session is None
@@ -132,13 +133,20 @@ class CaptchaService:
         self.task_id = task_id
         import logging
         logging.getLogger(__name__).info('CAPTCHA accepted task id: %s', task_id)
+        answer_end = self.clock() + self.result_timeout
+        timeout_code = 'answer_timeout' if answer_end <= end else 'deadline_exceeded'
+        end = min(end, answer_end)
         for attempt in range(self.max_polls):
             remaining = end - self.clock()
-            if remaining <= self.poll_interval:
-                raise CaptchaTimeout('deadline_exceeded')
-            self.sleep(self.poll_interval)
+            if remaining <= 0:
+                raise CaptchaTimeout(timeout_code)
+            self.sleep(min(self.poll_interval, remaining))
+            if self.clock() >= end:
+                raise CaptchaTimeout(timeout_code)
             try:
                 ready, answer = self._request('/res.php', {'key': self.key, 'action': 'get', 'id': task_id, 'json': 1}, end)
+            except CaptchaTimeout:
+                raise CaptchaTimeout(timeout_code) from None
             except CaptchaError:
                 # Reading an existing answer cannot create or charge another task.
                 transient = self.exchanges[-1].get('error_type') in ('ConnectionError', 'Timeout', 'ReadTimeout', 'ConnectTimeout')

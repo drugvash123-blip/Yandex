@@ -110,33 +110,109 @@ def test_new_stages_only_continue_with_explicit_remaining_budget(monkeypatch, fa
     assert result.status == 'captcha'  # Budget exhaustion never pretends success.
 
 
-def test_definitive_unsolvable_gets_only_one_fresh_attempt(monkeypatch):
+@pytest.mark.parametrize('code', ['ERROR_CAPTCHA_UNSOLVABLE', 'answer_timeout', 'poll_limit_reached'])
+def test_failed_recognition_refreshes_until_quota_exhausted(monkeypatch, code):
     import runner
     from unittest.mock import AsyncMock
     monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=True))
     monkeypatch.setattr(runner.asyncio, 'sleep', AsyncMock())
     class Handler:
-        remaining_attempts = float('inf')
+        remaining_attempts = 3
         calls = 0
         refresh_challenge = AsyncMock()
         async def __call__(self, page):
             self.calls += 1
-            raise CaptchaError('ERROR_CAPTCHA_UNSOLVABLE')
+            self.remaining_attempts -= 1
+            raise CaptchaError(code)
     handler = Handler()
     result = runner.Result('query', 'example.com')
     assert asyncio.run(runner.wait_captcha(None, result, 0, handler, runner.CaptchaBudget())) is False
-    assert handler.calls == 2
-    handler.refresh_challenge.assert_awaited_once()
+    assert handler.calls == 3
+    assert handler.refresh_challenge.await_count == 2
     assert result.status == 'captcha'
 
 
+def test_delayed_readiness_beyond_sixty_seconds_does_not_submit_early(monkeypatch):
+    import captcha_handler
+    from unittest.mock import AsyncMock, Mock
+    service = SimpleNamespace(solve_image=Mock(return_value='answer'))
+    inspections = 0
+    async def inspect(page):
+        nonlocal inspections
+        inspections += 1
+        assert service.solve_image.call_count == 0
+        return {'state': 'ready' if inspections > 125 else 'changing',
+                'candidates': [{'kind': 'text', 'frame_index': 0}]}
+    monkeypatch.setattr(captcha_handler, 'inspect_captcha', inspect)
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    async def solve(page, spec, callback, **kwargs):
+        assert inspections == 126
+        assert await callback(b'fake-png') == 'answer'
+    monkeypatch.setattr(captcha_handler, 'solve_challenge', solve)
+    images = SimpleNamespace(evaluate_all=AsyncMock(return_value='image'))
+    asyncio.run(PaidSearchCaptchaHandler(service)(SimpleNamespace(locator=lambda selector: images)))
+    service.solve_image.assert_called_once()
+
+
+@pytest.mark.parametrize('code', ['transport_error', 'ERROR_WRONG_USER_KEY', 'ERROR_ZERO_BALANCE'])
+def test_nonrecognition_errors_never_refresh_or_resubmit(monkeypatch, code):
+    import runner
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=True))
+    handler = SimpleNamespace(remaining_attempts=float('inf'), refresh_challenge=AsyncMock())
+    async def fail(page):
+        raise CaptchaError(code)
+    class CallableHandler:
+        remaining_attempts = handler.remaining_attempts
+        refresh_challenge = handler.refresh_challenge
+        __call__ = AsyncMock(side_effect=fail)
+    selected = CallableHandler()
+    assert not asyncio.run(runner.wait_captcha(None, runner.Result('query', 'example.com'), 900, selected, runner.CaptchaBudget()))
+    selected.__call__.assert_awaited_once()
+    handler.refresh_challenge.assert_not_awaited()
+
+
+def test_answer_timeout_with_no_refresh_button_stops_without_new_submission(monkeypatch):
+    import runner
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(runner, 'captcha_present', AsyncMock(return_value=True))
+    class Handler:
+        remaining_attempts = float('inf')
+        __call__ = AsyncMock(side_effect=CaptchaError('answer_timeout'))
+        refresh_challenge = AsyncMock(side_effect=CaptchaError('refresh_control_unavailable'))
+    handler = Handler()
+    result = runner.Result('query', 'example.com')
+    assert not asyncio.run(runner.wait_captcha(None, result, 900, handler, runner.CaptchaBudget()))
+    handler.__call__.assert_awaited_once()
+    assert result.detail.endswith('refresh_control_unavailable')
+
+
+def test_readiness_wait_is_cancelled_by_overall_deadline(monkeypatch):
+    import captcha_handler
+    from unittest.mock import AsyncMock, Mock
+    monkeypatch.setattr(captcha_handler, 'inspect_captcha', AsyncMock(return_value={'state':'changing','candidates':[]}))
+    service = SimpleNamespace(solve_image=Mock())
+    async def run():
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(.01):
+                await PaidSearchCaptchaHandler(service)(None)
+    asyncio.run(run())
+    service.solve_image.assert_not_called()
+
+
 @pytest.mark.parametrize('changed', [True, False])
-def test_refresh_requires_changed_loaded_image(monkeypatch, changed):
+@pytest.mark.parametrize('pending', [True, False])
+def test_refresh_requires_changed_loaded_image(monkeypatch, changed, pending):
     import captcha_handler
     from unittest.mock import AsyncMock
     monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
     state = {'state': 'ready', 'candidates': [{'kind': 'silhouette', 'frame_index': 0}]}
-    monkeypatch.setattr(captcha_handler, 'inspect_captcha', AsyncMock(return_value=state))
+    checks = 0
+    async def inspect(page):
+        nonlocal checks
+        checks += 1
+        return {**state, 'state': 'not_ready'} if pending and checks == 1 else state
+    monkeypatch.setattr(captcha_handler, 'inspect_captcha', inspect)
     calls = 0
     async def sources(*args):
         nonlocal calls
